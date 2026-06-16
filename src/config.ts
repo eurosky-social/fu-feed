@@ -1,0 +1,108 @@
+import { Database } from './db'
+import { DidResolver } from '@atproto/identity'
+import { Redis } from 'ioredis'
+import { AtpAgent } from '@atproto/api'
+import type { ILikeGraph } from './graph/types'
+import type { ContentFilter } from './ranker/types'
+
+// A published feed: its record rkey and the content it restricts to.
+export type FeedDef = { rkey: string; content: ContentFilter }
+
+export type AppContext = {
+  db: Database
+  redis: Redis
+  didResolver: DidResolver
+  // Unauthenticated agent against the public AppView, used to hydrate post
+  // metadata (createdAt / likeCount / labels) for ranking candidates.
+  publicAgent: AtpAgent
+  // In-memory like-graph engine (present when rankerEngine === 'graph').
+  graph?: ILikeGraph
+  cfg: Config
+}
+
+export type Config = {
+  port: number
+  listenhost: string
+  hostname: string
+  serviceDid: string
+  publisherDid: string
+  // Postgres connection string (pg-style URL).
+  databaseUrl: string
+  // Redis connection string used for the per-viewer ranked-list cache.
+  redisUrl: string
+  // Jetstream websocket endpoint (lightweight JSON firehose, ~1/10 the size).
+  jetstreamEndpoint: string
+  // Public AppView used for lazy post-metadata hydration.
+  publicAppviewUrl: string
+  subscriptionReconnectDelay: number
+  // Which ranker computes personalized results: the in-memory graph engine
+  // (fast) or the per-request Postgres CTE (simpler, slower).
+  rankerEngine: 'graph' | 'postgres'
+  graph: GraphConfig
+  // Published feeds: the main feed plus optional content-typed variants. All
+  // share the one in-memory graph; only their content filter differs.
+  feeds: FeedDef[]
+  // How long like edges + post metadata are retained, in hours.
+  retentionHours: number
+  // How long a viewer is considered "backfilled" before we re-import their
+  // like history, in seconds. Doubles as the stampede lock duration.
+  backfillTtlSeconds: number
+  ranking: RankingConfig
+}
+
+// Knobs for the in-memory like-graph engine (src/graph/).
+export type GraphConfig = {
+  // 'arrays' = Map + number[][] adjacency (simple); 'csr' = typed-array CSR +
+  // arena interners (more compact, larger windows). Both rank identically.
+  layout: 'arrays' | 'csr'
+  // hours of like history held in RAM (≤ Postgres retentionHours)
+  windowHours: number
+  // periodic full rebuild from Postgres — refreshes + applies retention/deletes
+  rebuildIntervalMs: number
+  // max likers scanned per seed post during curator discovery (viral guard)
+  seedLikerScanCap: number
+  // hard ceiling on edge visits per request (pathological-viewer guard)
+  maxEdgeVisits: number
+}
+
+// Tunable knobs for the path-counting collaborative-filter ranker. All
+// overridable via env (see .env.example).
+export type RankingConfig = {
+  // viewer's N most-recent likes used as the personalization seed
+  seedLimit: number
+  // cap on distinct curators (users who liked the seed posts)
+  maxCurators: number
+  // top-N most-recent likes considered per curator
+  maxLikesPerCurator: number
+  // a candidate post's like must be within this many hours
+  candidateLikeWindowHours: number
+  // a candidate post must have been created within this many hours
+  freshnessHours: number
+  // exponential time-decay half-life on post age, in hours
+  halfLifeHours: number
+  // path-count exponent — boosts posts reached via many independent paths
+  smoothing: number
+  // popularity penalty exponent: score divided by likeCount^penalty
+  popularityPenalty: number
+  // normalization exponents (1 = full, 0 = none)
+  curatorBranchingPower: number // divide a curator's credit by their out-degree
+  itemBranchingPower: number // divide a seed item's credit by its popularity
+  // discounts a curator's older likes by recency rank (0 = off; 1 = only their
+  // most-recent like counts)
+  coraterDecay: number
+  // seed weighting: most-recent like gets this weight, oldest gets 1.0, linearly
+  // scaled — reduces over-reactivity to the latest likes
+  seedRecencyMinWeight: number
+  // a candidate needs at least this many distinct curators (0 = off)
+  minEligibleRaters: number
+  // how many top-scoring candidates to hydrate + finalize
+  maxCandidates: number
+  // maximum length of the ranked list cached per viewer
+  maxFeedSize: number
+  // include reply posts? Default false — top-level posts only
+  includeReplies: boolean
+  // diversification: max posts from a single author in the final list
+  perAuthorCap: number
+  // TTL of the cached per-viewer ranked list, in seconds
+  cacheTtlSeconds: number
+}

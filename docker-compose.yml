@@ -1,0 +1,29 @@
+# Local dev dependencies for the For You feed generator.
+# Run `docker-compose up -d` then `npm start` on the host.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: foryou
+    ports:
+      - '5432:5432'
+    volumes:
+      - foryou_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - foryou_redisdata:/data
+
+volumes:
+  foryou_pgdata:
+  foryou_redisdata:
