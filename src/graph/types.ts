@@ -14,6 +14,9 @@ export interface ILikeGraph {
     viewerDid: string,
     seedUris: string[],
     r: RankingConfig,
+    // how many top candidates to return; defaults to r.maxCandidates. Content
+    // feeds pass a larger value so enough survive the downstream media filter.
+    candidateLimit?: number,
   ): Map<string, number>
   stats(): { ready: boolean; users: number; posts: number }
 }

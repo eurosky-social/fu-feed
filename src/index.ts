@@ -42,6 +42,8 @@ const run = async () => {
       maybeFloat(process.env.FEEDGEN_SEED_RECENCY_MIN_WEIGHT) ?? 0.1,
     minEligibleRaters: maybeInt(process.env.FEEDGEN_MIN_ELIGIBLE_RATERS) ?? 0,
     maxCandidates: maybeInt(process.env.FEEDGEN_MAX_CANDIDATES) ?? 500,
+    mediaCandidateMultiplier:
+      maybeInt(process.env.FEEDGEN_MEDIA_CANDIDATE_MULTIPLIER) ?? 8,
     maxFeedSize: maybeInt(process.env.FEEDGEN_MAX_FEED_SIZE) ?? 1000,
     includeReplies: process.env.FEEDGEN_INCLUDE_REPLIES === 'true',
     perAuthorCap: maybeInt(process.env.FEEDGEN_PER_AUTHOR_CAP) ?? 3,

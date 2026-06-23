@@ -2,6 +2,7 @@ export type DatabaseSchema = {
   likes: Like
   post_meta: PostMeta
   seen: Seen
+  interactions: Interaction
   sub_state: SubState
 }
 
@@ -48,6 +49,21 @@ export type Seen = {
   viewer_did: string
   subject_uri: string
   seen_at: string
+}
+
+// Reward signal from app.bsky.feed.sendInteractions: positive events
+// (like/repost/requestMore/clickthrough/…) and the explicit negative
+// (requestLess) on served posts, kept durably so ranking parameters can be
+// evaluated/tuned against real engagement.
+export type Interaction = {
+  viewer_did: string
+  subject_uri: string
+  // the interaction event token (app.bsky.feed.defs#…)
+  event: string
+  // signed reward weight (positive = good, negative = "less like this")
+  weight: number
+  // when we received it (ISO 8601)
+  created_at: string
 }
 
 export type SubState = {

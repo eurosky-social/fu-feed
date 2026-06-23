@@ -106,10 +106,15 @@ export const startRetentionSweep = (
   db: Database,
   retentionHours: number,
   intervalMs = 10 * 60 * 1000,
+  // Reward signal is kept longer than raw likes so parameter tuning has history.
+  interactionsRetentionHours = 30 * 24,
 ): NodeJS.Timeout => {
   const sweep = async () => {
     const cutoff = new Date(
       Date.now() - retentionHours * 60 * 60 * 1000,
+    ).toISOString()
+    const interactionsCutoff = new Date(
+      Date.now() - interactionsRetentionHours * 60 * 60 * 1000,
     ).toISOString()
     try {
       const likes = await db
@@ -120,9 +125,14 @@ export const startRetentionSweep = (
         .deleteFrom('post_meta')
         .where('created_at', '<', cutoff)
         .executeTakeFirst()
+      const interactions = await db
+        .deleteFrom('interactions')
+        .where('created_at', '<', interactionsCutoff)
+        .executeTakeFirst()
       console.log(
         `🧹 retention sweep removed ${Number(likes.numDeletedRows ?? 0)} likes, ` +
-          `${Number(posts.numDeletedRows ?? 0)} post_meta (cutoff ${cutoff})`,
+          `${Number(posts.numDeletedRows ?? 0)} post_meta, ` +
+          `${Number(interactions.numDeletedRows ?? 0)} interactions (cutoff ${cutoff})`,
       )
     } catch (err) {
       console.error('retention sweep failed', err)

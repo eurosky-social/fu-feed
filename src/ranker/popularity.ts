@@ -15,6 +15,11 @@ export class PopularityRanker implements Ranker {
     const cutoff = new Date(
       Date.now() - cfg.freshnessHours * 60 * 60 * 1000,
     ).toISOString()
+    // Content feeds over-fetch so enough survive the media filter in finalize.
+    const limit =
+      content === 'all'
+        ? cfg.maxCandidates
+        : cfg.maxCandidates * cfg.mediaCandidateMultiplier
 
     const rows = await sql<{ subject_uri: string; likes: number }>`
       SELECT subject_uri, count(*)::int AS likes
@@ -22,7 +27,7 @@ export class PopularityRanker implements Ranker {
       WHERE indexed_at > ${cutoff}
       GROUP BY subject_uri
       ORDER BY likes DESC
-      LIMIT ${cfg.maxCandidates}
+      LIMIT ${limit}
     `.execute(ctx.db)
 
     const rawScores = new Map<string, number>()

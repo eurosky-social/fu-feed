@@ -113,3 +113,37 @@ migrations['003'] = {
     await db.schema.alterTable('post_meta').dropColumn('is_video').execute()
   },
 }
+
+migrations['004'] = {
+  async up(db: Kysely<unknown>) {
+    // durable reward signal from sendInteractions (see schema Interaction).
+    await db.schema
+      .createTable('interactions')
+      .addColumn('viewer_did', 'varchar', (col) => col.notNull())
+      .addColumn('subject_uri', 'varchar', (col) => col.notNull())
+      .addColumn('event', 'varchar', (col) => col.notNull())
+      .addColumn('weight', 'integer', (col) => col.notNull())
+      .addColumn('created_at', 'varchar', (col) => col.notNull())
+      .addPrimaryKeyConstraint('interactions_pk', [
+        'viewer_did',
+        'subject_uri',
+        'event',
+      ])
+      .execute()
+
+    // per-viewer recent reward lookups + retention sweeps by ingest time
+    await db.schema
+      .createIndex('interactions_viewer_idx')
+      .on('interactions')
+      .columns(['viewer_did', 'created_at'])
+      .execute()
+    await db.schema
+      .createIndex('interactions_created_idx')
+      .on('interactions')
+      .column('created_at')
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('interactions').execute()
+  },
+}

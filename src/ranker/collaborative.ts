@@ -21,6 +21,11 @@ export class CollaborativeFilterRanker implements Ranker {
   ): Promise<string[]> {
     if (!viewerDid) return []
     const cfg = ctx.cfg.ranking
+    // Content feeds over-generate so enough survive the media filter in finalize.
+    const candidateLimit =
+      content === 'all'
+        ? cfg.maxCandidates
+        : cfg.maxCandidates * cfg.mediaCandidateMultiplier
 
     // 1. seed: viewer's recent likes (deduped, ordered recent → old)
     const seedRows = await ctx.db
@@ -108,7 +113,7 @@ export class CollaborativeFilterRanker implements Ranker {
       WHERE capped.subject_uri <> ALL(${seedUris})
       GROUP BY capped.subject_uri
       ORDER BY score_acc DESC
-      LIMIT ${cfg.maxCandidates}
+      LIMIT ${candidateLimit}
     `.execute(ctx.db)
 
     // eligibility + num_paths^smoothing (monotonic, so SQL's ordering holds)

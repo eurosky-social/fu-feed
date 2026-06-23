@@ -179,6 +179,7 @@ export class LikeGraph implements ILikeGraph {
     viewerDid: string,
     seedUris: string[],
     r: RankingConfig,
+    candidateLimit = r.maxCandidates,
   ): Map<string, number> {
     const out = new Map<string, number>()
     const n = seedUris.length
@@ -284,7 +285,7 @@ export class LikeGraph implements ILikeGraph {
       scored.push({ post, raw: Math.pow(acc, r.smoothing) })
     }
     scored.sort((a, b) => b.raw - a.raw)
-    const top = scored.slice(0, r.maxCandidates)
+    const top = scored.slice(0, candidateLimit)
     for (const { post, raw } of top) out.set(this.postUri[post], raw)
     return out
   }

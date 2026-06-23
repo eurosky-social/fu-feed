@@ -37,7 +37,12 @@ export class GraphRanker implements Ranker {
       return []
     }
 
-    const raw = graph.score(viewerDid, seedUris, cfg)
+    // Content feeds over-generate so enough candidates survive the media filter.
+    const candidateLimit =
+      content === 'all'
+        ? cfg.maxCandidates
+        : cfg.maxCandidates * cfg.mediaCandidateMultiplier
+    const raw = graph.score(viewerDid, seedUris, cfg, candidateLimit)
 
     // Authoritative already-liked exclusion: drop every post the viewer has
     // liked recently (from Postgres — covers likes beyond the capped seed and

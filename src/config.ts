@@ -97,6 +97,10 @@ export type RankingConfig = {
   minEligibleRaters: number
   // how many top-scoring candidates to hydrate + finalize
   maxCandidates: number
+  // content-typed feeds (image/video) over-generate to maxCandidates × this so
+  // enough survive the media filter (media is a fraction of all posts). Applied
+  // only when content !== 'all'; 1 = off.
+  mediaCandidateMultiplier: number
   // maximum length of the ranked list cached per viewer
   maxFeedSize: number
   // include reply posts? Default false — top-level posts only

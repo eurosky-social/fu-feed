@@ -54,18 +54,29 @@ The in-memory graph has two interchangeable layouts (`FEEDGEN_GRAPH_LAYOUT`): `c
 compressed-sparse-row + arena interners; compact, supports large retention windows) and `arrays`
 (Map-based; simpler). `FEEDGEN_GRAPH_WINDOW_HOURS` controls how much history is held in RAM.
 
-## Interactions (unseen-only feed)
+## Interactions
 
-The feed serves posts the viewer hasn't already seen, so a refresh brings new content. Clients report
-seen posts via `app.bsky.feed.sendInteractions` ([src/methods/send-interactions.ts](src/methods/send-interactions.ts));
-seen posts are stored per viewer in Redis and excluded from results. Publishing sets
-`acceptsInteractions: true` so clients send these events.
+Clients report interaction events via `app.bsky.feed.sendInteractions`
+([src/methods/send-interactions.ts](src/methods/send-interactions.ts)); the AppView proxies them with the
+viewer's signed JWT, and publishing sets `acceptsInteractions: true` so clients send them. Two things
+happen:
+
+- **`interactionSeen`** drives an **unseen-only feed** — seen posts are tracked per viewer in Redis and
+  filtered out, so a refresh brings new content.
+- **Positive events** (`interactionLike`, `interactionRepost`, `requestMore`, clickthroughs, …) and the
+  **negative `requestLess`** are recorded with a signed weight in the `interactions` table — a durable
+  reward signal for evaluating and tuning ranking parameters against real engagement. The signal is
+  collected only; it does not yet feed back into ranking.
 
 ## Multiple feeds
 
 Content-typed variants (images, video) share the **one** in-memory graph — only a final content filter
 differs, so additional feeds add negligible memory. Set `FEEDGEN_IMAGE_FEED_RKEY` /
 `FEEDGEN_VIDEO_FEED_RKEY` to the rkeys you publish for them.
+
+Because media is a fraction of all posts, content feeds **over-generate** candidates
+(`maxCandidates × FEEDGEN_MEDIA_CANDIDATE_MULTIPLIER`) before applying the media filter, so a photo or
+video feed isn't starved by a content-blind candidate cap.
 
 ## Getting started
 
