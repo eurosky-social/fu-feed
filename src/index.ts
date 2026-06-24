@@ -87,6 +87,12 @@ const run = async () => {
     retentionHours: maybeInt(process.env.FEEDGEN_RETENTION_HOURS) ?? 72,
     backfillTtlSeconds:
       maybeInt(process.env.FEEDGEN_BACKFILL_TTL_SECONDS) ?? 21600, // 6h
+    colikerBackfill: {
+      enabled: process.env.FEEDGEN_COLIKER_BACKFILL !== 'false',
+      seedPosts:
+        maybeInt(process.env.FEEDGEN_COLIKER_BACKFILL_SEED_POSTS) ?? 50,
+      maxPages: maybeInt(process.env.FEEDGEN_COLIKER_BACKFILL_MAX_PAGES) ?? 3,
+    },
     hostname,
     serviceDid,
     ranking,

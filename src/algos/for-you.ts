@@ -4,7 +4,10 @@ import { CollaborativeFilterRanker } from '../ranker/collaborative'
 import { GraphRanker } from '../ranker/graph'
 import { PopularityRanker } from '../ranker/popularity'
 import { Ranker, ContentFilter } from '../ranker/types'
-import { ensureViewerBackfilled } from '../ranker/backfill'
+import {
+  ensureViewerBackfilled,
+  backfillSeedColikers,
+} from '../ranker/backfill'
 import { cacheRankedList, getRankedList, rankedListKey, getSeen } from '../redis'
 
 const cfRanker: Ranker = new CollaborativeFilterRanker()
@@ -34,6 +37,10 @@ export const handler = async (
       ranked,
       ctx.cfg.ranking.cacheTtlSeconds,
     )
+    // Densify the co-liker graph for this viewer's seed posts in the background
+    // (never blocks the skeleton response). On completion it invalidates this
+    // viewer's cached lists so the next load reflects the denser graph.
+    if (viewerDid) void backfillSeedColikers(ctx, viewerDid)
   }
 
   // Serve unseen posts only (seen set is shared across feeds for a viewer).

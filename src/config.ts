@@ -47,7 +47,19 @@ export type Config = {
   // How long a viewer is considered "backfilled" before we re-import their
   // like history, in seconds. Doubles as the stampede lock duration.
   backfillTtlSeconds: number
+  // Background densification of the co-liker graph for a viewer's seed posts
+  // via app.bsky.feed.getLikes (see ranker/backfill.ts).
+  colikerBackfill: ColikerBackfillConfig
   ranking: RankingConfig
+}
+
+export type ColikerBackfillConfig = {
+  // master switch
+  enabled: boolean
+  // top-N most-recent seed posts to densify per viewer
+  seedPosts: number
+  // getLikes pages fetched per under-covered post (×100 likers); also a depth cap
+  maxPages: number
 }
 
 // Knobs for the in-memory like-graph engine (src/graph/).

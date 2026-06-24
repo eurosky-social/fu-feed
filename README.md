@@ -44,6 +44,24 @@ Jetstream (app.bsky.feed.like) ──► ingester ──► Postgres (likes, pos
   [src/methods/](src/methods/)) — reads the viewer DID from the signed feed-generator JWT, caches the
   ranked list per viewer in Redis, and serves unseen posts (see Interactions below).
 
+### Backfill
+
+Two backfills make a viewer's feed good on their first load instead of waiting for the firehose to
+accumulate:
+
+- **Per-viewer seed** — the viewer's own like history is imported via `com.atproto.repo.listRecords`, so
+  their seed is complete from the start.
+- **Seed co-likers** — in the background, the historical likers of the viewer's recent seed posts are
+  imported from the AppView (`app.bsky.feed.getLikes`) to densify the co-liker graph beyond what live
+  ingestion has seen. It's bounded per viewer (once per backfill TTL), per post (deduped across viewers,
+  skipped once a post is well-covered), and in depth (only likes within the retention window), runs off
+  the request path, and invalidates the viewer's cached lists on completion so the next load reflects the
+  denser graph.
+
+Both are lazy and self-limiting — they run only for viewers who load the feed, and converge as the graph
+fills. For a complete cold-start graph independent of who subscribes, do a one-time network-wide repo
+backfill instead (`com.atproto.sync.listRepos` → per-repo like records).
+
 ### Ranker engines (`FEEDGEN_RANKER`)
 
 - **`graph`** (default) — holds the like graph in RAM (built from Postgres on boot, kept live from the
