@@ -1,4 +1,4 @@
-# For You — personalized ATProto feed generator
+# For EU — personalized ATProto feed generator
 
 A personalized "For You" feed for the AT Protocol, built on the standard
 [feed generator](https://github.com/bluesky-social/feed-generator) interface. Any client can
