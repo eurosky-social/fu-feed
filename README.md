@@ -126,6 +126,25 @@ Once published, the feed appears in any client's custom-feed search and can be s
 All configuration is via environment variables — see [.env.example](.env.example) for the full list
 with descriptions (storage, ingestion, identity/publishing, ranker engine, and ranking parameters).
 
+## Acknowledgments
+
+The ranking algorithm is **[LinkLonk](https://linklonk.com/about)**, created by
+[spacecowboy](https://bsky.app/profile/spacecowboy17.bsky.social) — a trust-based collaborative-filter
+recommender. This feed is an independent implementation of the likes-only, Bluesky-specific case of it
+(as in spacecowboy's [foryou.club](https://foryou.club) feed): seed from the viewer's recent likes →
+co-likers → their recent likes, with path-count smoothing, a popularity penalty, a recency half-life,
+and co-rater decay.
+
+Thanks also to **[Graze](https://github.com/graze-social/personalization)**, whose Rust implementation
+of the LinkLonk algorithm for Bluesky feeds was a helpful reference.
+
+Where this implementation differs is **memory efficiency**. It holds the entire like graph in RAM as a
+compressed-sparse-row (CSR) layout of typed arrays with an arena-based string interner — DIDs and URIs
+are mapped to integer IDs in a chunked byte arena + an open-addressed hash, instead of JavaScript
+Maps/objects. That cuts graph memory roughly 2.5–3× versus a naive in-memory representation, so the
+full 90-day like graph fits in ~47 GB and the traversal runs in-process (tens of milliseconds) on a
+single commodity server.
+
 ## License
 
 MIT. This project builds on [bluesky-social/feed-generator](https://github.com/bluesky-social/feed-generator)
