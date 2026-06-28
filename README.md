@@ -56,7 +56,9 @@ accumulate:
   ingestion has seen. It's bounded per viewer (once per backfill TTL), per post (deduped across viewers,
   skipped once a post is well-covered), and in depth (only likes within the retention window), runs off
   the request path, and invalidates the viewer's cached lists on completion so the next load reflects the
-  denser graph.
+  denser graph. It's a cold-start bridge: once live ingestion already spans a full retention window the
+  firehose has every in-window like, so the backfill switches itself off (and back on automatically if
+  you later widen retention).
 
 Both are lazy and self-limiting — they run only for viewers who load the feed, and converge as the graph
 fills. For a complete cold-start graph independent of who subscribes, do a one-time network-wide repo

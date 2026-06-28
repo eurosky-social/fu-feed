@@ -1,3 +1,4 @@
+import { sql } from 'kysely'
 import { createHash } from 'crypto'
 import { AtpAgent } from '@atproto/api'
 import { AppContext } from '../config'
@@ -190,6 +191,22 @@ export const backfillSeedColikers = async (
   if (won !== 'OK') return // ran recently (or in progress)
 
   try {
+    // Cold-start gate: the backfill only ever fetches likes within the retention
+    // window, and live ingestion captures every like in real time — so once the
+    // likes table already spans a full retention window, the firehose has every
+    // in-window like and the backfill can't add anything new. Skip it. This
+    // self-disables after the ramp and re-enables automatically if retention is
+    // widened, since it keys on the actual span of data (also correct across
+    // restarts, where the persisted table already spans the window).
+    const span = await sql<{ oldest: string | null }>`
+      SELECT MIN(indexed_at) AS oldest FROM likes
+    `.execute(ctx.db)
+    const oldest = span.rows[0]?.oldest
+    if (oldest) {
+      const spanHours = (Date.now() - Date.parse(oldest)) / (60 * 60 * 1000)
+      if (spanHours >= ctx.cfg.retentionHours) return
+    }
+
     const seedRows = await ctx.db
       .selectFrom('likes')
       .select('subject_uri')
