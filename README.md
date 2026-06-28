@@ -138,12 +138,14 @@ and co-rater decay.
 Thanks also to **[Graze](https://github.com/graze-social/personalization)**, whose Rust implementation
 of the LinkLonk algorithm for Bluesky feeds was a helpful reference.
 
-Where this implementation differs is **memory efficiency**. It holds the entire like graph in RAM as a
-compressed-sparse-row (CSR) layout of typed arrays with an arena-based string interner — DIDs and URIs
-are mapped to integer IDs in a chunked byte arena + an open-addressed hash, instead of JavaScript
-Maps/objects. That cuts graph memory roughly 2.5–3× versus a naive in-memory representation, so the
-full 90-day like graph fits in ~47 GB and the traversal runs in-process (tens of milliseconds) on a
-single commodity server.
+What this implementation focuses on is **fitting the graph in RAM**. It holds the entire like graph in
+memory as a compressed-sparse-row (CSR) layout of typed arrays with an arena-based string interner —
+DIDs and URIs are mapped to integer IDs in a chunked byte arena + an open-addressed hash, rather than
+JavaScript Maps/objects. That's ~2.5–3× leaner than the same graph built with ordinary JS Maps (the
+fallback `arrays` layout), so the full 90-day like graph fits in ~47 GB and the traversal runs
+in-process (tens of milliseconds) on a single commodity server. (Graze takes a different tack — the
+graph lives in Redis as day-tranched sorted sets, shared across feeds; this keeps it in-process for
+single-feed traversal latency.)
 
 ## License
 
