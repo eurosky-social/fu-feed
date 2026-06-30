@@ -43,16 +43,24 @@ export const handler = async (
     if (viewerDid) void backfillSeedColikers(ctx, viewerDid)
   }
 
-  // Serve unseen posts only (seen set is shared across feeds for a viewer).
+  // Serve unseen posts only (the seen set is shared across feeds for a viewer),
+  // but paginate by a STABLE offset into the immutable cached `ranked` list — not
+  // into a seen-filtered view. Filtering before slicing would shift every post's
+  // index as `seen` grows between requests, so the cursor offset would skip or
+  // truncate pages (the "scroll shows nothing / reload collapses to a few posts"
+  // bug). Instead we walk `ranked` from the cursor, skipping seen posts while
+  // advancing the offset past them, so each page resumes exactly where the last
+  // ended and we scan to the true end of the list.
   const seen = viewerDid ? await getSeen(ctx.redis, viewerDid) : null
-  const visible =
-    seen && seen.size > 0 ? ranked.filter((u) => !seen.has(u)) : ranked
-
-  const offset = parseCursor(params.cursor)
-  const slice = visible.slice(offset, offset + params.limit)
-  const nextOffset = offset + slice.length
-  const cursor = nextOffset < visible.length ? String(nextOffset) : undefined
-  return { cursor, feed: slice.map((post) => ({ post })) }
+  const start = parseCursor(params.cursor)
+  const posts: { post: string }[] = []
+  let i = start
+  for (; i < ranked.length && posts.length < params.limit; i++) {
+    if (seen && seen.has(ranked[i])) continue
+    posts.push({ post: ranked[i] })
+  }
+  const cursor = i < ranked.length ? String(i) : undefined
+  return { cursor, feed: posts }
 }
 
 const computeRanked = async (
