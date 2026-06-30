@@ -15,8 +15,12 @@ const graphRanker: Ranker = new GraphRanker()
 const popularityRanker: Ranker = new PopularityRanker()
 
 // Compute-on-request with a per-(feed, viewer) Redis cache of the ranked list.
-// Posts the viewer has already seen are filtered out at serve time so a refresh
-// brings new content; the cursor is an offset into the remaining list.
+// The cached list is an IMMUTABLE snapshot: a seen-aware order is baked in once
+// at compute time (unseen first, already-seen demoted to the tail as filler),
+// and serving is a pure offset slice into it. That keeps pagination stable —
+// the cursor offset can't desync as `seen` grows or the list is recomputed
+// between requests — and stops the feed collapsing to a few/zero posts once the
+// viewer has seen most of it (seen posts become filler, never dropped).
 export const handler = async (
   ctx: AppContext,
   params: QueryParams,
@@ -30,7 +34,9 @@ export const handler = async (
     // On a cache miss, import the viewer's like history so the first request is
     // already personalized (runs at most once per backfill TTL).
     if (viewerDid) await ensureViewerBackfilled(ctx, viewerDid)
-    ranked = await computeRanked(ctx, viewerDid, feed.content)
+    const scored = await computeRanked(ctx, viewerDid, feed.content)
+    // Bake the seen-aware order in now so every page is a plain offset slice.
+    ranked = await orderBySeen(ctx, viewerDid, scored)
     await cacheRankedList(
       ctx.redis,
       cacheKey,
@@ -43,24 +49,29 @@ export const handler = async (
     if (viewerDid) void backfillSeedColikers(ctx, viewerDid)
   }
 
-  // Serve unseen posts only (the seen set is shared across feeds for a viewer),
-  // but paginate by a STABLE offset into the immutable cached `ranked` list — not
-  // into a seen-filtered view. Filtering before slicing would shift every post's
-  // index as `seen` grows between requests, so the cursor offset would skip or
-  // truncate pages (the "scroll shows nothing / reload collapses to a few posts"
-  // bug). Instead we walk `ranked` from the cursor, skipping seen posts while
-  // advancing the offset past them, so each page resumes exactly where the last
-  // ended and we scan to the true end of the list.
-  const seen = viewerDid ? await getSeen(ctx.redis, viewerDid) : null
-  const start = parseCursor(params.cursor)
-  const posts: { post: string }[] = []
-  let i = start
-  for (; i < ranked.length && posts.length < params.limit; i++) {
-    if (seen && seen.has(ranked[i])) continue
-    posts.push({ post: ranked[i] })
-  }
-  const cursor = i < ranked.length ? String(i) : undefined
-  return { cursor, feed: posts }
+  const offset = parseCursor(params.cursor)
+  const slice = ranked.slice(offset, offset + params.limit)
+  const nextOffset = offset + slice.length
+  const cursor = nextOffset < ranked.length ? String(nextOffset) : undefined
+  return { cursor, feed: slice.map((post) => ({ post })) }
+}
+
+// Partition the scored list into unseen-then-seen (order preserved within each
+// group). A refresh surfaces fresh content first, but nothing is ever dropped —
+// the seen tail is filler that keeps the feed full once the viewer has worked
+// through the unseen posts, instead of collapsing to empty.
+const orderBySeen = async (
+  ctx: AppContext,
+  viewerDid: string | null,
+  scored: string[],
+): Promise<string[]> => {
+  if (!viewerDid) return scored
+  const seen = await getSeen(ctx.redis, viewerDid)
+  if (seen.size === 0) return scored
+  const unseen: string[] = []
+  const seenList: string[] = []
+  for (const uri of scored) (seen.has(uri) ? seenList : unseen).push(uri)
+  return unseen.concat(seenList)
 }
 
 const computeRanked = async (
