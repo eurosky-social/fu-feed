@@ -8,7 +8,13 @@ import {
   ensureViewerBackfilled,
   backfillSeedColikers,
 } from '../ranker/backfill'
-import { cacheRankedList, getRankedList, rankedListKey, getSeen } from '../redis'
+import {
+  cacheRankedList,
+  recacheRankedList,
+  getRankedList,
+  rankedListKey,
+  getSeen,
+} from '../redis'
 
 const cfRanker: Ranker = new CollaborativeFilterRanker()
 const graphRanker: Ranker = new GraphRanker()
@@ -28,6 +34,7 @@ export const handler = async (
   feed: FeedDef,
 ) => {
   const cacheKey = rankedListKey(feed.rkey, viewerDid)
+  const offset = parseCursor(params.cursor)
 
   let ranked = await getRankedList(ctx.redis, cacheKey)
   if (!ranked) {
@@ -47,9 +54,15 @@ export const handler = async (
     // (never blocks the skeleton response). On completion it invalidates this
     // viewer's cached lists so the next load reflects the denser graph.
     if (viewerDid) void backfillSeedColikers(ctx, viewerDid)
+  } else if (offset === 0 && viewerDid) {
+    // A no-cursor request is a refresh: re-demote posts seen since this snapshot
+    // was built so the reload surfaces the next unseen posts. Cheap — reuses the
+    // cached set and preserves the TTL, so the periodic recompute still brings in
+    // genuinely-new graph content on schedule.
+    ranked = await orderBySeen(ctx, viewerDid, ranked)
+    await recacheRankedList(ctx.redis, cacheKey, ranked)
   }
 
-  const offset = parseCursor(params.cursor)
   const slice = ranked.slice(offset, offset + params.limit)
   const nextOffset = offset + slice.length
   const cursor = nextOffset < ranked.length ? String(nextOffset) : undefined

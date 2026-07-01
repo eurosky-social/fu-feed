@@ -30,6 +30,8 @@ const run = async () => {
       maybeInt(process.env.FEEDGEN_CANDIDATE_WINDOW_HOURS) ?? 24,
     freshnessHours: maybeInt(process.env.FEEDGEN_FRESHNESS_HOURS) ?? 24,
     halfLifeHours: maybeInt(process.env.FEEDGEN_HALF_LIFE_HOURS) ?? 6,
+    candidateRecencyHalfLifeHours:
+      maybeFloat(process.env.FEEDGEN_CANDIDATE_RECENCY_HALFLIFE_HOURS) ?? 12,
     smoothing: maybeFloat(process.env.FEEDGEN_SMOOTHING) ?? 0.5,
     popularityPenalty:
       maybeFloat(process.env.FEEDGEN_POPULARITY_PENALTY) ?? 0.3,

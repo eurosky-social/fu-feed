@@ -24,6 +24,21 @@ export const cacheRankedList = async (
   }
 }
 
+// Overwrite an existing ranked list while preserving its TTL (SET … KEEPTTL).
+// Used to persist a re-ranked snapshot on refresh without postponing the
+// periodic recompute that the original expiry triggers.
+export const recacheRankedList = async (
+  redis: Redis,
+  key: string,
+  uris: string[],
+): Promise<void> => {
+  try {
+    await redis.set(key, JSON.stringify(uris), 'KEEPTTL')
+  } catch (err) {
+    console.error('redis recache write failed', err)
+  }
+}
+
 export const getRankedList = async (
   redis: Redis,
   key: string,

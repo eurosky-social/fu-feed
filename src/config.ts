@@ -92,6 +92,11 @@ export type RankingConfig = {
   freshnessHours: number
   // exponential time-decay half-life on post age, in hours
   halfLifeHours: number
+  // exponential decay half-life on a candidate's most-recent co-liker like, in
+  // hours — applied at candidate SELECTION so fresh, lightly-corroborated posts
+  // compete for the top-N instead of being cut before the post-age decay runs.
+  // 0 = off (pure corroboration ordering).
+  candidateRecencyHalfLifeHours: number
   // path-count exponent — boosts posts reached via many independent paths
   smoothing: number
   // popularity penalty exponent: score divided by likeCount^penalty

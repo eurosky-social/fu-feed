@@ -239,13 +239,18 @@ export class LikeGraph implements ILikeGraph {
     )
     const scoreAcc = new Map<number, number>()
     const raters = new Map<number, number>()
+    // most-recent co-liker-like time (tsMin) per candidate — drives the recency
+    // weight applied at selection so fresh posts survive the top-N cut.
+    const lastTs = new Map<number, number>()
     const cand: number[] = [] // postInt
     const candRn: number[] = [] // 1-based recency rank
+    const candTs: number[] = [] // tsMin of the co-liker like
     for (const [c, wc] of curators) {
       const arr = this.fwd[c]
       if (!arr) continue
       cand.length = 0
       candRn.length = 0
+      candTs.length = 0
       const seenPosts = new Set<number>()
       let rn = 0
       // walk recent-first (from the end); arr = [postInt, tsMin, …]
@@ -262,6 +267,7 @@ export class LikeGraph implements ILikeGraph {
         rn++
         cand.push(post)
         candRn.push(rn)
+        candTs.push(ts)
         if (++visits > budget) break
       }
       const deg = cand.length
@@ -274,15 +280,27 @@ export class LikeGraph implements ILikeGraph {
           r.coraterDecay > 0 ? Math.pow(1 - r.coraterDecay, candRn[t] - 1) : 1
         scoreAcc.set(post, (scoreAcc.get(post) ?? 0) + norm * factor)
         raters.set(post, (raters.get(post) ?? 0) + 1)
+        const prev = lastTs.get(post)
+        if (prev === undefined || candTs[t] > prev) lastTs.set(post, candTs[t])
       }
       if (visits > budget) break
     }
 
-    // 5. eligibility + num_paths^smoothing, take top maxCandidates
+    // 5. eligibility + num_paths^smoothing, weighted by co-liker-like recency so
+    // fresh (recently-liked) posts survive the top-maxCandidates cut instead of
+    // being dropped before finalize's post-age decay can rank them.
+    const recencyOn = r.candidateRecencyHalfLifeHours > 0
+    const nowMin = toTsMin(Date.now())
+    const halfLifeMin = r.candidateRecencyHalfLifeHours * 60
     const scored: { post: number; raw: number }[] = []
     for (const [post, acc] of scoreAcc) {
       if ((raters.get(post) ?? 0) < r.minEligibleRaters) continue
-      scored.push({ post, raw: Math.pow(acc, r.smoothing) })
+      let raw = Math.pow(acc, r.smoothing)
+      if (recencyOn) {
+        const ageMin = Math.max(0, nowMin - (lastTs.get(post) ?? nowMin))
+        raw *= Math.pow(0.5, ageMin / halfLifeMin)
+      }
+      scored.push({ post, raw })
     }
     scored.sort((a, b) => b.raw - a.raw)
     const top = scored.slice(0, candidateLimit)
