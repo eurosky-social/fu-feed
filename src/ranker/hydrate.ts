@@ -52,6 +52,7 @@ export const hydratePostMeta = async (
           is_reply: m.is_reply ? 1 : 0,
           is_image: m.is_image ? 1 : 0,
           is_video: m.is_video ? 1 : 0,
+          langs: m.langs.join(','),
           hydrated_at: new Date().toISOString(),
         })),
       )
@@ -65,6 +66,7 @@ export const hydratePostMeta = async (
           is_reply: eb.ref('excluded.is_reply'),
           is_image: eb.ref('excluded.is_image'),
           is_video: eb.ref('excluded.is_video'),
+          langs: eb.ref('excluded.langs'),
           hydrated_at: eb.ref('excluded.hydrated_at'),
         })),
       )
@@ -116,6 +118,7 @@ const fetchFromAppview = async (
         is_reply: !!record.reply,
         is_image: hasMedia(post, 'images'),
         is_video: hasMedia(post, 'video'),
+        langs: normalizeLangs(record.langs),
       })
     }
   }
@@ -146,6 +149,23 @@ const hasAdultLabel = (post: any): boolean => {
   return labels.some((l) => ADULT_LABELS.has(l?.val))
 }
 
+// Normalizes a post record's `langs` to deduped primary BCP-47 subtags:
+// lowercased, region/script stripped ('pt-BR' -> 'pt'). Ignores malformed
+// entries. Returns [] when the post declares no usable language.
+const normalizeLangs = (raw: unknown): string[] => {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const primary = entry.split('-')[0].trim().toLowerCase()
+    if (!primary || seen.has(primary)) continue
+    seen.add(primary)
+    out.push(primary)
+  }
+  return out
+}
+
 const authorFromUri = (uri: string): string => {
   // at://<did>/app.bsky.feed.post/<rkey>
   const match = uri.match(/^at:\/\/([^/]+)\//)
@@ -162,6 +182,7 @@ const toCandidateMeta = (row: {
   is_reply: number
   is_image: number
   is_video: number
+  langs: string
 }): CandidateMeta => ({
   uri: row.uri,
   author_did: row.author_did,
@@ -172,4 +193,5 @@ const toCandidateMeta = (row: {
   is_reply: row.is_reply === 1,
   is_image: row.is_image === 1,
   is_video: row.is_video === 1,
+  langs: row.langs ? row.langs.split(',').filter(Boolean) : [],
 })

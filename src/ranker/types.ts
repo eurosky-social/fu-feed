@@ -22,4 +22,7 @@ export type CandidateMeta = {
   is_reply: boolean
   is_image: boolean
   is_video: boolean
+  // normalized primary BCP-47 language subtags declared on the post (e.g.
+  // ['en', 'de']); empty when the post declares no language.
+  langs: string[]
 }

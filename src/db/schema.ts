@@ -39,6 +39,10 @@ export type PostMeta = {
   // media flags for content-typed feed variants
   is_image: number
   is_video: number
+  // declared post languages: normalized primary BCP-47 subtags, comma-joined
+  // (e.g. 'en,de'); '' when the post declares none. Feeds the cold-start
+  // language allowlist.
+  langs: string
   // when this metadata was last refreshed (ISO 8601)
   hydrated_at: string
 }

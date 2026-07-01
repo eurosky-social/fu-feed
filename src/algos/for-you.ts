@@ -18,7 +18,8 @@ import {
 
 const cfRanker: Ranker = new CollaborativeFilterRanker()
 const graphRanker: Ranker = new GraphRanker()
-const popularityRanker: Ranker = new PopularityRanker()
+// Concrete type (not Ranker): its rank() takes an extra cold-start language arg.
+const popularityRanker = new PopularityRanker()
 
 // Compute-on-request with a per-(feed, viewer) Redis cache of the ranked list.
 // The cached list is an IMMUTABLE snapshot: a seen-aware order is baked in once
@@ -32,6 +33,10 @@ export const handler = async (
   params: QueryParams,
   viewerDid: string | null,
   feed: FeedDef,
+  // Normalized primary language subtags from the viewer's Accept-Language,
+  // in preference order; [] when the header is absent. Used only to bias the
+  // cold-start feed (see computeRanked).
+  viewerLangs: string[],
 ) => {
   const cacheKey = rankedListKey(feed.rkey, viewerDid)
   const offset = parseCursor(params.cursor)
@@ -41,7 +46,7 @@ export const handler = async (
     // On a cache miss, import the viewer's like history so the first request is
     // already personalized (runs at most once per backfill TTL).
     if (viewerDid) await ensureViewerBackfilled(ctx, viewerDid)
-    const scored = await computeRanked(ctx, viewerDid, feed.content)
+    const scored = await computeRanked(ctx, viewerDid, feed.content, viewerLangs)
     // Bake the seen-aware order in now so every page is a plain offset slice.
     ranked = await orderBySeen(ctx, viewerDid, scored)
     await cacheRankedList(
@@ -91,13 +96,20 @@ const computeRanked = async (
   ctx: AppContext,
   viewerDid: string | null,
   content: ContentFilter,
+  viewerLangs: string[],
 ): Promise<string[]> => {
   // Personalized first; fall back to popularity for anonymous / no-history
   // viewers and while the graph is still building.
   const engine = ctx.cfg.rankerEngine === 'graph' ? graphRanker : cfRanker
   const personalized = await engine.rank(ctx, viewerDid, content)
   if (personalized.length > 0) return personalized
-  return popularityRanker.rank(ctx, viewerDid, content)
+  // Bias the cold-start feed by the viewer's Accept-Language — but only for
+  // authenticated viewers, whose ranked list is cached per-DID. Anonymous
+  // viewers share one cache entry (viewerDid = null), so applying a per-request
+  // header there would let one viewer's language poison every other viewer's
+  // shared list; they stay global.
+  const langs = viewerDid ? viewerLangs : []
+  return popularityRanker.rank(ctx, viewerDid, content, langs)
 }
 
 const parseCursor = (cursor?: string): number => {

@@ -8,6 +8,11 @@ export type FinalizeOptions = {
   applyPopularityPenalty: boolean
   // restrict results to a media type (image/video) for content-typed variants
   content: ContentFilter
+  // cold-start language allowlist (normalized primary BCP-47 subtags). When
+  // non-empty, a post survives only if it declares no language or shares at
+  // least one with the allowlist — undeclared posts always pass, so the feed
+  // biases toward these languages without starving. Empty/undefined = off.
+  languages?: string[]
 }
 
 // Shared back half of every ranker: hydrate candidate metadata, apply
@@ -24,6 +29,8 @@ export const finalize = async (
   const metas = await hydratePostMeta(ctx, [...rawScores.keys()])
   const now = Date.now()
   const freshnessMs = cfg.freshnessHours * 60 * 60 * 1000
+  const langAllow =
+    opts.languages && opts.languages.length > 0 ? new Set(opts.languages) : null
 
   const scored: { uri: string; author: string; score: number }[] = []
   for (const [uri, raw] of rawScores) {
@@ -33,6 +40,13 @@ export const finalize = async (
     if (meta.is_reply && !cfg.includeReplies) continue // top-level posts only
     if (opts.content === 'image' && !meta.is_image) continue
     if (opts.content === 'video' && !meta.is_video) continue
+    // Language allowlist: undeclared posts pass; declared ones must overlap.
+    if (
+      langAllow &&
+      meta.langs.length > 0 &&
+      !meta.langs.some((l) => langAllow.has(l))
+    )
+      continue
 
     const age = now - Date.parse(meta.created_at)
     if (isNaN(age) || age > freshnessMs) continue

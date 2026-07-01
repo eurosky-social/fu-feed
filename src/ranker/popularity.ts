@@ -4,12 +4,15 @@ import { Ranker, ContentFilter } from './types'
 import { finalize } from './finalize'
 
 // Cold-start ranker for anonymous viewers and users with no likes yet: the
-// most-liked recent posts, still subject to time-decay and freshness.
+// most-liked recent posts, still subject to time-decay and freshness. When the
+// viewer's Accept-Language yields a non-empty `languages` allowlist, the feed is
+// biased toward those languages (see finalize); [] leaves it global.
 export class PopularityRanker implements Ranker {
   async rank(
     ctx: AppContext,
     _viewerDid: string | null,
     content: ContentFilter,
+    languages: string[] = [],
   ): Promise<string[]> {
     const cfg = ctx.cfg.ranking
     const cutoff = new Date(
@@ -33,7 +36,12 @@ export class PopularityRanker implements Ranker {
     const rawScores = new Map<string, number>()
     for (const row of rows.rows) rawScores.set(row.subject_uri, row.likes)
 
-    // No popularity penalty for cold start — popular posts should win.
-    return finalize(ctx, rawScores, { applyPopularityPenalty: false, content })
+    // No popularity penalty for cold start — popular posts should win. Bias
+    // toward the viewer's languages when known (undeclared posts still pass).
+    return finalize(ctx, rawScores, {
+      applyPopularityPenalty: false,
+      content,
+      languages,
+    })
   }
 }

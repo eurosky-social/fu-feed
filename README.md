@@ -20,7 +20,12 @@ A collaborative filter over the network's **likes**:
    the viewer has already liked or seen.
 
 Anonymous viewers and brand-new accounts get a cold-start popularity feed (most-liked recent posts).
-Every parameter is env-overridable — see [.env.example](.env.example).
+For an authenticated but likeless account, that feed is biased toward the languages in the request's
+`Accept-Language` header (forwarded by the AppView) — the only per-viewer taste signal available before
+the account has liked anything. Posts declaring a non-matching language are dropped; posts that declare
+no language always pass, so the feed narrows toward the viewer's languages without starving. Anonymous
+viewers share one cached list, so they stay global (a per-request header there would poison the shared
+list). Every ranking parameter is env-overridable — see [.env.example](.env.example).
 
 ## Architecture
 

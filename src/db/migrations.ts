@@ -147,3 +147,18 @@ migrations['004'] = {
     await db.schema.dropTable('interactions').execute()
   },
 }
+
+migrations['005'] = {
+  async up(db: Kysely<unknown>) {
+    // BCP-47 language subtags declared on the post record, normalized to primary
+    // subtags and comma-joined (e.g. 'en,de'); '' when the post declares none.
+    // Powers the cold-start language allowlist (see ranker/finalize.ts).
+    await db.schema
+      .alterTable('post_meta')
+      .addColumn('langs', 'varchar', (col) => col.notNull().defaultTo(''))
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.alterTable('post_meta').dropColumn('langs').execute()
+  },
+}
