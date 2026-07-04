@@ -133,7 +133,7 @@ with descriptions (storage, ingestion, identity/publishing, ranker engine, and r
 
 ## Acknowledgments
 
-The ranking algorithm is **[LinkLonk](https://linklonk.com/about)**, created by
+The ranking algorithm is **[foryou.club](https://foryou.club/)**, created by
 [spacecowboy](https://bsky.app/profile/spacecowboy17.bsky.social) — a trust-based collaborative-filter
 recommender. This feed is an independent implementation of the likes-only, Bluesky-specific case of it
 (as in spacecowboy's [foryou.club](https://foryou.club) feed): seed from the viewer's recent likes →
