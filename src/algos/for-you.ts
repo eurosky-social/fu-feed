@@ -43,9 +43,22 @@ export const handler = async (
 
   let ranked = await getRankedList(ctx.redis, cacheKey)
   if (!ranked) {
-    // On a cache miss, import the viewer's like history so the first request is
-    // already personalized (runs at most once per backfill TTL).
-    if (viewerDid) await ensureViewerBackfilled(ctx, viewerDid)
+    // Backfill the viewer's like history so a viewer who already has likes is
+    // personalized rather than dropped to popularity. ensureViewerBackfilled runs
+    // two stages (once per backfill TTL): a small inline first slice we AWAIT here
+    // so the first load can personalize, plus a background top-up to the full seed
+    // for later loads. We bound the wait by wall-clock (inlineBackfillDeadlineMs)
+    // in addition to the inline slice's own size cap, so a slow PDS can never trip
+    // the AppView's feed-fetch timeout ("feed unavailable" / "upstream
+    // unreachable"): on a timeout we serve the cold-start feed now and the
+    // backfill invalidates the cache when it lands, personalizing the next load.
+    // Anonymous / no-history viewers get the cold-start popularity feed.
+    if (viewerDid) {
+      await raceDeadline(
+        ensureViewerBackfilled(ctx, viewerDid),
+        ctx.cfg.ranking.inlineBackfillDeadlineMs,
+      )
+    }
     const scored = await computeRanked(ctx, viewerDid, feed.content, viewerLangs)
     // Bake the seen-aware order in now so every page is a plain offset slice.
     ranked = await orderBySeen(ctx, viewerDid, scored)
@@ -101,7 +114,18 @@ const computeRanked = async (
   // Personalized first; fall back to popularity for anonymous / no-history
   // viewers and while the graph is still building.
   const engine = ctx.cfg.rankerEngine === 'graph' ? graphRanker : cfRanker
-  const personalized = await engine.rank(ctx, viewerDid, content)
+  let personalized: string[] = []
+  try {
+    personalized = await engine.rank(ctx, viewerDid, content)
+  } catch (err) {
+    // A personalization failure (ranker/redis/db hiccup) must never surface as a
+    // feed error; degrade to the cold-start popularity feed below so the viewer
+    // always gets content.
+    console.error(
+      `[foryou] personalized rank failed for viewer=${viewerDid}; falling back to popularity`,
+      err,
+    )
+  }
   if (personalized.length > 0) return personalized
   // Bias the cold-start feed by the viewer's Accept-Language — but only for
   // authenticated viewers, whose ranked list is cached per-DID. Anonymous
@@ -110,6 +134,22 @@ const computeRanked = async (
   // shared list; they stay global.
   const langs = viewerDid ? viewerLangs : []
   return popularityRanker.rank(ctx, viewerDid, content, langs)
+}
+
+// Awaits `p` but gives up after `ms`, resolving either way and never rejecting.
+// If `p` loses the race it keeps running in the background (ensureViewerBackfilled
+// handles its own errors and invalidates the viewer's cache on completion), so a
+// slow backfill lands on the next load instead of blocking this response.
+const raceDeadline = (p: Promise<unknown>, ms: number): Promise<void> => {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    void p
+      .catch(() => {})
+      .finally(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+  })
 }
 
 const parseCursor = (cursor?: string): number => {

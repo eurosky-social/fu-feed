@@ -126,4 +126,14 @@ export type RankingConfig = {
   perAuthorCap: number
   // TTL of the cached per-viewer ranked list, in seconds
   cacheTtlSeconds: number
+  // On a viewer's first request, how many of their most-recent likes to import
+  // inline (a single listRecords page) so that first load can already be
+  // personalized. Kept small so the crawl fits inside the AppView's feed-fetch
+  // timeout; the rest of the seed accrues from the live firehose.
+  inlineBackfillLimit: number
+  // Wall-clock budget for that inline backfill. If the viewer's PDS is slower
+  // than this, we stop waiting and serve the cold-start feed; the backfill keeps
+  // running in the background and invalidates the viewer's cache when done, so
+  // the next load is personalized. Must stay below the AppView's feed timeout.
+  inlineBackfillDeadlineMs: number
 }

@@ -50,6 +50,10 @@ const run = async () => {
     includeReplies: process.env.FEEDGEN_INCLUDE_REPLIES === 'true',
     perAuthorCap: maybeInt(process.env.FEEDGEN_PER_AUTHOR_CAP) ?? 3,
     cacheTtlSeconds: maybeInt(process.env.FEEDGEN_CACHE_TTL_SECONDS) ?? 600,
+    inlineBackfillLimit:
+      maybeInt(process.env.FEEDGEN_INLINE_BACKFILL_LIMIT) ?? 100,
+    inlineBackfillDeadlineMs:
+      maybeInt(process.env.FEEDGEN_INLINE_BACKFILL_DEADLINE_MS) ?? 1500,
   }
 
   const server = FeedGenerator.create({
