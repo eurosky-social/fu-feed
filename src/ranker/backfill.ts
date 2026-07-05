@@ -18,9 +18,25 @@ type BackfilledLike = {
   indexed_at: string
 }
 
-// Ensures a viewer's history has been backfilled at most once per TTL, using a
-// Redis SET NX flag both as a one-shot guard and a stampede lock. Degrades to a
-// no-op (cold-start) if Redis or the viewer's PDS is unavailable.
+// Imports a viewer's like history in two stages, at most once per TTL (guarded
+// by a Redis SET NX flag that doubles as a stampede lock). Degrades to a no-op
+// (cold-start) if Redis or the viewer's PDS is unavailable.
+//
+// Skips entirely when the graph already holds a full seed (>= seedLimit) for the
+// viewer: their newest likes are already present live from the firehose, so
+// crawling their newest N likes from the PDS couldn't add anything.
+//
+// Stage 1 (inline): a small first slice (`inlineBackfillLimit`, ~one listRecords
+// page) that the feed handler AWAITS, up to a deadline, so the very first load
+// can already be personalized without the full crawl tripping the AppView's feed
+// timeout. The returned promise resolves when this stage is done.
+//
+// Stage 2 (background, detached): tops up to the full seed (`seedLimit`) so a
+// later load is personalized from the viewer's whole recent history. Runs
+// un-awaited; the caller returns after stage 1.
+//
+// Each stage invalidates the viewer's cached lists on success so the enriched
+// seed lands on the next request.
 export const ensureViewerBackfilled = async (
   ctx: AppContext,
   viewerDid: string,
@@ -41,18 +57,69 @@ export const ensureViewerBackfilled = async (
   }
   if (won !== 'OK') return // already backfilled recently (or in progress)
 
+  const inlineLimit = ctx.cfg.ranking.inlineBackfillLimit
+  const fullLimit = ctx.cfg.ranking.seedLimit
+
+  // Skip when the graph already holds a full seed for this viewer -- the PDS
+  // crawl would only re-fetch likes we already have. On a count error, fall
+  // through and back fill (safe default). As the 90d graph matures more viewers
+  // clear this bar and stop being crawled.
+  let existing = 0
   try {
-    const n = await backfillViewerLikes(ctx, viewerDid)
-    console.log(`⤓ backfilled ${n} likes for ${viewerDid}`)
+    existing = await countViewerLikes(ctx, viewerDid, fullLimit)
   } catch (err) {
-    console.error(`backfill failed for ${viewerDid}`, err)
+    console.error(`seed count failed for ${viewerDid}; proceeding with backfill`, err)
+  }
+  if (existing >= fullLimit) return
+
+  // Stage 1 (inline).
+  try {
+    const first = await backfillViewerLikes(ctx, viewerDid, inlineLimit)
+    console.log(`⤓ inline-backfilled ${first} likes for ${viewerDid}`)
+    // No-op on the first request (nothing cached yet); it matters when the caller
+    // hit its deadline and already served + cached the cold-start feed, dropping
+    // it so the next load is personalized.
+    if (first > 0) await invalidateViewerCache(ctx, viewerDid)
+  } catch (err) {
+    console.error(`inline backfill failed for ${viewerDid}`, err)
     // release the flag so a later request can retry
     try {
       await ctx.redis.del(key)
     } catch {
       /* ignore */
     }
+    return // don't attempt the top-up if we couldn't import the first slice
   }
+
+  // Stage 2 (background top-up). Detached so the caller returns after stage 1.
+  if (fullLimit > inlineLimit) {
+    void backfillViewerLikes(ctx, viewerDid, fullLimit)
+      .then((total) => {
+        console.log(`⤓ backfilled ${total} likes (full) for ${viewerDid}`)
+        if (total > 0) return invalidateViewerCache(ctx, viewerDid)
+      })
+      .catch((err) =>
+        console.error(`full backfill top-up failed for ${viewerDid}`, err),
+      )
+  }
+}
+
+// Capped count of a viewer's likes already in the graph. Bounded by `cap` (via a
+// LIMITed subquery) so it never scans a prolific viewer's whole partition; uses
+// the same `liker_did` index the ranker's seed query does. Returns min(actual,
+// cap), so `>= cap` means "at least a full seed".
+const countViewerLikes = async (
+  ctx: AppContext,
+  viewerDid: string,
+  cap: number,
+): Promise<number> => {
+  const res = await sql<{ n: number }>`
+    SELECT count(*)::int AS n
+    FROM (
+      SELECT 1 FROM likes WHERE liker_did = ${viewerDid} LIMIT ${cap}
+    ) capped
+  `.execute(ctx.db)
+  return res.rows[0]?.n ?? 0
 }
 
 // Pages the viewer's most-recent likes (default listRecords order is
@@ -61,6 +128,7 @@ export const ensureViewerBackfilled = async (
 export const backfillViewerLikes = async (
   ctx: AppContext,
   viewerDid: string,
+  maxLikes: number = ctx.cfg.ranking.seedLimit,
 ): Promise<number> => {
   const pds = await resolvePds(ctx, viewerDid)
   if (!pds) {
@@ -69,7 +137,7 @@ export const backfillViewerLikes = async (
   }
 
   const agent = new AtpAgent({ service: pds })
-  const seedLimit = ctx.cfg.ranking.seedLimit
+  const seedLimit = maxLikes
   const pageSize = 100
   const nowIso = new Date().toISOString()
 
