@@ -124,6 +124,10 @@ export class CollaborativeFilterRanker implements Ranker {
     }
     if (rawScores.size === 0) return []
 
-    return finalize(ctx, rawScores, { applyPopularityPenalty: true, content })
+    return finalize(ctx, rawScores, {
+      applyPopularityPenalty: true,
+      content,
+      viewerDid,
+    })
   }
 }

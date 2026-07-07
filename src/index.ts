@@ -49,6 +49,7 @@ const run = async () => {
     maxFeedSize: maybeInt(process.env.FEEDGEN_MAX_FEED_SIZE) ?? 1000,
     includeReplies: process.env.FEEDGEN_INCLUDE_REPLIES === 'true',
     perAuthorCap: maybeInt(process.env.FEEDGEN_PER_AUTHOR_CAP) ?? 3,
+    authorMinGap: maybeInt(process.env.FEEDGEN_AUTHOR_MIN_GAP) ?? 3,
     cacheTtlSeconds: maybeInt(process.env.FEEDGEN_CACHE_TTL_SECONDS) ?? 600,
     inlineBackfillLimit:
       maybeInt(process.env.FEEDGEN_INLINE_BACKFILL_LIMIT) ?? 100,

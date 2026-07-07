@@ -61,6 +61,6 @@ export class GraphRanker implements Ranker {
 
     return raw.size === 0
       ? []
-      : finalize(ctx, raw, { applyPopularityPenalty: true, content })
+      : finalize(ctx, raw, { applyPopularityPenalty: true, content, viewerDid })
   }
 }

@@ -124,6 +124,10 @@ export type RankingConfig = {
   includeReplies: boolean
   // diversification: max posts from a single author in the final list
   perAuthorCap: number
+  // diversification: minimum number of slots between two posts by the same
+  // author, so an author's capped posts are spread out instead of clustered.
+  // Best-effort — relaxed when no other author is available (0 = off).
+  authorMinGap: number
   // TTL of the cached per-viewer ranked list, in seconds
   cacheTtlSeconds: number
   // On a viewer's first request, how many of their most-recent likes to import

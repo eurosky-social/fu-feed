@@ -10,7 +10,7 @@ import { finalize } from './finalize'
 export class PopularityRanker implements Ranker {
   async rank(
     ctx: AppContext,
-    _viewerDid: string | null,
+    viewerDid: string | null,
     content: ContentFilter,
     languages: string[] = [],
   ): Promise<string[]> {
@@ -42,6 +42,7 @@ export class PopularityRanker implements Ranker {
       applyPopularityPenalty: false,
       content,
       languages,
+      viewerDid,
     })
   }
 }
