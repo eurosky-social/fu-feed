@@ -1,9 +1,29 @@
+import { Selectable } from 'kysely'
 import { AppContext } from '../config'
+import { PostMeta } from '../db/schema'
 import { CandidateMeta } from './types'
 
 const HYDRATION_TTL_MS = 60 * 60 * 1000 // refresh post metadata at most hourly
 const GET_POSTS_CHUNK = 25 // app.bsky.feed.getPosts max uris per call
 const ADULT_LABELS = new Set(['porn', 'sexual', 'nudity'])
+
+// Postgres caps a single statement at 65535 bind parameters (the wire protocol
+// uses an int16 count). Content-typed feeds over-fetch maxCandidates ×
+// mediaCandidateMultiplier URIs (tens of thousands), so both the cache read
+// (1 param/uri) and the write-back (11 params/row) must be chunked or the
+// statement overflows and throws. Keep each batch well under the limit.
+const DB_READ_CHUNK = 10000 // `uri in (...)` — 1 param/uri, safely under 65535
+const DB_WRITE_CHUNK = 2000 // 2000 rows × 11 cols = 22000 params, under 65535
+// Bound the getPosts fan-out: 24k candidates / 25 = ~960 chunks, and firing them
+// all at once hammers the public AppView (socket exhaustion / rate limits).
+const APPVIEW_CONCURRENCY = 20
+
+// Splits an array into fixed-size batches (the last may be shorter).
+const chunk = <T>(arr: T[], size: number): T[][] => {
+  const out: T[][] = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
 
 // Resolves metadata (createdAt / global likeCount / labels / quote-ness) for a
 // set of candidate post URIs. Hits the local post_meta cache first and only
@@ -16,15 +36,18 @@ export const hydratePostMeta = async (
   if (uris.length === 0) return out
 
   const unique = [...new Set(uris)]
-  const cached = await ctx.db
-    .selectFrom('post_meta')
-    .selectAll()
-    .where('uri', 'in', unique)
-    .execute()
+  const cachedByUri = new Map<string, Selectable<PostMeta>>()
+  for (const batch of chunk(unique, DB_READ_CHUNK)) {
+    const rows = await ctx.db
+      .selectFrom('post_meta')
+      .selectAll()
+      .where('uri', 'in', batch)
+      .execute()
+    for (const row of rows) cachedByUri.set(row.uri, row)
+  }
 
   const freshCutoff = Date.now() - HYDRATION_TTL_MS
   const stale: string[] = []
-  const cachedByUri = new Map(cached.map((r) => [r.uri, r]))
 
   for (const uri of unique) {
     const row = cachedByUri.get(uri)
@@ -39,38 +62,43 @@ export const hydratePostMeta = async (
 
   const hydrated = await fetchFromAppview(ctx, stale)
   if (hydrated.length > 0) {
-    await ctx.db
-      .insertInto('post_meta')
-      .values(
-        hydrated.map((m) => ({
-          uri: m.uri,
-          author_did: m.author_did,
-          created_at: m.created_at,
-          like_count: m.like_count,
-          is_quote: m.is_quote ? 1 : 0,
-          is_adult: m.is_adult ? 1 : 0,
-          is_reply: m.is_reply ? 1 : 0,
-          is_image: m.is_image ? 1 : 0,
-          is_video: m.is_video ? 1 : 0,
-          langs: m.langs.join(','),
-          hydrated_at: new Date().toISOString(),
-        })),
-      )
-      .onConflict((oc) =>
-        oc.column('uri').doUpdateSet((eb) => ({
-          author_did: eb.ref('excluded.author_did'),
-          created_at: eb.ref('excluded.created_at'),
-          like_count: eb.ref('excluded.like_count'),
-          is_quote: eb.ref('excluded.is_quote'),
-          is_adult: eb.ref('excluded.is_adult'),
-          is_reply: eb.ref('excluded.is_reply'),
-          is_image: eb.ref('excluded.is_image'),
-          is_video: eb.ref('excluded.is_video'),
-          langs: eb.ref('excluded.langs'),
-          hydrated_at: eb.ref('excluded.hydrated_at'),
-        })),
-      )
-      .execute()
+    const hydratedAt = new Date().toISOString()
+    // Chunk the write-back: POST_META_COLUMNS params/row means a single insert
+    // of every hydrated candidate would blow past Postgres's 65535 param cap.
+    for (const batch of chunk(hydrated, DB_WRITE_CHUNK)) {
+      await ctx.db
+        .insertInto('post_meta')
+        .values(
+          batch.map((m) => ({
+            uri: m.uri,
+            author_did: m.author_did,
+            created_at: m.created_at,
+            like_count: m.like_count,
+            is_quote: m.is_quote ? 1 : 0,
+            is_adult: m.is_adult ? 1 : 0,
+            is_reply: m.is_reply ? 1 : 0,
+            is_image: m.is_image ? 1 : 0,
+            is_video: m.is_video ? 1 : 0,
+            langs: m.langs.join(','),
+            hydrated_at: hydratedAt,
+          })),
+        )
+        .onConflict((oc) =>
+          oc.column('uri').doUpdateSet((eb) => ({
+            author_did: eb.ref('excluded.author_did'),
+            created_at: eb.ref('excluded.created_at'),
+            like_count: eb.ref('excluded.like_count'),
+            is_quote: eb.ref('excluded.is_quote'),
+            is_adult: eb.ref('excluded.is_adult'),
+            is_reply: eb.ref('excluded.is_reply'),
+            is_image: eb.ref('excluded.is_image'),
+            is_video: eb.ref('excluded.is_video'),
+            langs: eb.ref('excluded.langs'),
+            hydrated_at: eb.ref('excluded.hydrated_at'),
+          })),
+        )
+        .execute()
+    }
 
     for (const m of hydrated) out.set(m.uri, m)
   }
@@ -83,22 +111,25 @@ const fetchFromAppview = async (
   uris: string[],
 ): Promise<CandidateMeta[]> => {
   const results: CandidateMeta[] = []
-  const chunks: string[][] = []
-  for (let i = 0; i < uris.length; i += GET_POSTS_CHUNK) {
-    chunks.push(uris.slice(i, i + GET_POSTS_CHUNK))
-  }
+  const postChunks = chunk(uris, GET_POSTS_CHUNK)
 
-  const responses = await Promise.all(
-    chunks.map((chunk) =>
-      ctx.publicAgent.app.bsky.feed
-        .getPosts({ uris: chunk })
-        .then((res) => res.data.posts)
-        .catch((err) => {
-          console.error('getPosts hydration failed', err)
-          return []
-        }),
-    ),
-  )
+  // Fire the getPosts calls in bounded-concurrency waves so a large candidate
+  // set (hundreds of chunks) doesn't blast the public AppView all at once.
+  const responses: any[][] = []
+  for (const wave of chunk(postChunks, APPVIEW_CONCURRENCY)) {
+    const waveResults = await Promise.all(
+      wave.map((uriChunk) =>
+        ctx.publicAgent.app.bsky.feed
+          .getPosts({ uris: uriChunk })
+          .then((res) => res.data.posts)
+          .catch((err) => {
+            console.error('getPosts hydration failed', err)
+            return []
+          }),
+      ),
+    )
+    responses.push(...waveResults)
+  }
 
   for (const posts of responses) {
     for (const post of posts as any[]) {
