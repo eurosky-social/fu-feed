@@ -41,6 +41,10 @@ export const finalize = async (
     const meta = metas.get(uri)
     if (!meta) continue // unhydratable (deleted/blocked) — drop
     if (opts.viewerDid && meta.author_did === opts.viewerDid) continue // no self-recs
+    // Never surface the picker account's onboarding "interest posts": their likes
+    // seed personalization and act as co-liker hubs, but the posts themselves are
+    // not content. (Their likes are also exempt from the retention sweep.)
+    if (ctx.cfg.pickerDid && meta.author_did === ctx.cfg.pickerDid) continue
     if (meta.is_adult) continue
     if (meta.is_reply && !cfg.includeReplies) continue // top-level posts only
     if (opts.content === 'image' && !meta.is_image) continue
