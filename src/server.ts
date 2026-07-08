@@ -128,7 +128,9 @@ export class FeedGenerator {
     } else {
       this.ingester.run()
     }
-    this.retentionTimer = startRetentionSweep(this.db, this.cfg.retentionHours)
+    this.retentionTimer = startRetentionSweep(this.db, this.cfg.retentionHours, {
+      pickerDid: this.cfg.pickerDid,
+    })
     this.server = this.app.listen(this.cfg.port, this.cfg.listenhost)
     await events.once(this.server, 'listening')
     return this.server

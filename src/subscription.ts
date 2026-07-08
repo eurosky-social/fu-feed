@@ -102,13 +102,27 @@ export class LikesIngester extends JetstreamSubscriptionBase {
 // window so the working set stays bounded. The For You output is capped at
 // `freshnessHours`, but we retain likes a bit longer to keep seed/co-liker
 // coverage for infrequent likers.
+//
+// Likes on the picker account's posts (the onboarding "interest posts") are
+// exempt when `pickerDid` is set: those posts are meant to be permanent hubs
+// connecting interest-aligned users, so sweeping their edges after retention
+// would silently sever a user who picked an interest long ago from newer
+// onboarders who pick the same one.
 export const startRetentionSweep = (
   db: Database,
   retentionHours: number,
-  intervalMs = 10 * 60 * 1000,
-  // Reward signal is kept longer than raw likes so parameter tuning has history.
-  interactionsRetentionHours = 30 * 24,
+  opts: {
+    pickerDid?: string
+    intervalMs?: number
+    // Reward signal is kept longer than raw likes so parameter tuning has history.
+    interactionsRetentionHours?: number
+  } = {},
 ): NodeJS.Timeout => {
+  const {
+    pickerDid,
+    intervalMs = 10 * 60 * 1000,
+    interactionsRetentionHours = 30 * 24,
+  } = opts
   const sweep = async () => {
     const cutoff = new Date(
       Date.now() - retentionHours * 60 * 60 * 1000,
@@ -117,10 +131,16 @@ export const startRetentionSweep = (
       Date.now() - interactionsRetentionHours * 60 * 60 * 1000,
     ).toISOString()
     try {
-      const likes = await db
-        .deleteFrom('likes')
-        .where('indexed_at', '<', cutoff)
-        .executeTakeFirst()
+      let likesToDelete = db.deleteFrom('likes').where('indexed_at', '<', cutoff)
+      if (pickerDid) {
+        // DIDs contain no LIKE wildcards, so this prefix match is exact.
+        likesToDelete = likesToDelete.where(
+          'subject_uri',
+          'not like',
+          `at://${pickerDid}${POST_PATH}%`,
+        )
+      }
+      const likes = await likesToDelete.executeTakeFirst()
       const posts = await db
         .deleteFrom('post_meta')
         .where('created_at', '<', cutoff)

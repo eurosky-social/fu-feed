@@ -7,6 +7,7 @@
   "scripts": {
     "publishFeed": "ts-node scripts/publishFeedGen.ts",
     "unpublishFeed": "ts-node scripts/unpublishFeedGen.ts",
+    "createInterestPosts": "ts-node src/tools/createInterestPosts.ts",
     "start": "ts-node src/index.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
