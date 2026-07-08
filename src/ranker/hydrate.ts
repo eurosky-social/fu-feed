@@ -3,7 +3,6 @@ import { AppContext } from '../config'
 import { PostMeta } from '../db/schema'
 import { CandidateMeta } from './types'
 
-const HYDRATION_TTL_MS = 60 * 60 * 1000 // refresh post metadata at most hourly
 const GET_POSTS_CHUNK = 25 // app.bsky.feed.getPosts max uris per call
 const ADULT_LABELS = new Set(['porn', 'sexual', 'nudity'])
 
@@ -46,7 +45,7 @@ export const hydratePostMeta = async (
     for (const row of rows) cachedByUri.set(row.uri, row)
   }
 
-  const freshCutoff = Date.now() - HYDRATION_TTL_MS
+  const freshCutoff = Date.now() - ctx.cfg.ranking.hydrationTtlMs
   const stale: string[] = []
 
   for (const uri of unique) {

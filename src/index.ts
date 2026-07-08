@@ -55,6 +55,13 @@ const run = async () => {
       maybeInt(process.env.FEEDGEN_INLINE_BACKFILL_LIMIT) ?? 100,
     inlineBackfillDeadlineMs:
       maybeInt(process.env.FEEDGEN_INLINE_BACKFILL_DEADLINE_MS) ?? 1500,
+    hydrationTtlMs:
+      (maybeFloat(process.env.FEEDGEN_HYDRATION_TTL_HOURS) ?? 1) *
+      60 *
+      60 *
+      1000,
+    popularityCacheTtlSeconds:
+      maybeInt(process.env.FEEDGEN_POPULARITY_CACHE_TTL_SECONDS) ?? 120,
   }
 
   const server = FeedGenerator.create({

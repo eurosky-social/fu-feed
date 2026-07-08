@@ -145,4 +145,13 @@ export type RankingConfig = {
   // running in the background and invalidates the viewer's cache when done, so
   // the next load is personalized. Must stay below the AppView's feed timeout.
   inlineBackfillDeadlineMs: number
+  // How long a hydrated post_meta row is trusted before re-fetching it from the
+  // AppView, in ms. Most cached fields are immutable (createdAt/author/media/
+  // langs); this mainly bounds like_count staleness. Env: FEEDGEN_HYDRATION_TTL_HOURS.
+  hydrationTtlMs: number
+  // TTL (seconds) of the in-process cold-start popularity cache. The popularity
+  // fallback is a heavy GROUP-BY over recent likes and is viewer-independent, so
+  // it is computed at most once per TTL and shared across all cold-start viewers
+  // (stale-while-revalidate). Env: FEEDGEN_POPULARITY_CACHE_TTL_SECONDS.
+  popularityCacheTtlSeconds: number
 }

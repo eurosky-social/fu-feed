@@ -21,6 +21,11 @@ const graphRanker: Ranker = new GraphRanker()
 // Concrete type (not Ranker): its rank() takes an extra cold-start language arg.
 const popularityRanker = new PopularityRanker()
 
+// Pre-compute the shared cold-start popularity set so the first cold-start
+// request after boot doesn't pay the heavy GROUP-BY (see PopularityRanker).
+export const prewarmColdStart = (ctx: AppContext): Promise<void> =>
+  popularityRanker.warm(ctx)
+
 // Compute-on-request with a per-(feed, viewer) Redis cache of the ranked list.
 // The cached list is an IMMUTABLE snapshot: a seen-aware order is baked in once
 // at compute time (unseen first, already-seen demoted to the tail as filler),

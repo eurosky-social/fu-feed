@@ -15,6 +15,7 @@ import { LikeGraph } from './graph/like-graph'
 import { CsrLikeGraph } from './graph/csr-like-graph'
 import { ILikeGraph } from './graph/types'
 import { AppContext, Config } from './config'
+import { prewarmColdStart } from './algos/for-you'
 import wellKnown from './well-known'
 
 export class FeedGenerator {
@@ -25,6 +26,7 @@ export class FeedGenerator {
   public ingester: LikesIngester
   public graph?: ILikeGraph
   public cfg: Config
+  public ctx: AppContext
   private retentionTimer?: NodeJS.Timeout
   private rebuildTimer?: NodeJS.Timeout
 
@@ -35,6 +37,7 @@ export class FeedGenerator {
     ingester: LikesIngester,
     graph: ILikeGraph | undefined,
     cfg: Config,
+    ctx: AppContext,
   ) {
     this.app = app
     this.db = db
@@ -42,6 +45,7 @@ export class FeedGenerator {
     this.ingester = ingester
     this.graph = graph
     this.cfg = cfg
+    this.ctx = ctx
   }
 
   static create(cfg: Config) {
@@ -95,7 +99,7 @@ export class FeedGenerator {
     app.use(server.xrpc.router)
     app.use(wellKnown(ctx))
 
-    return new FeedGenerator(app, db, redis, ingester, graph, cfg)
+    return new FeedGenerator(app, db, redis, ingester, graph, cfg, ctx)
   }
 
   async start(): Promise<http.Server> {
@@ -131,6 +135,10 @@ export class FeedGenerator {
     this.retentionTimer = startRetentionSweep(this.db, this.cfg.retentionHours, {
       pickerDid: this.cfg.pickerDid,
     })
+    // Warm the shared cold-start popularity cache so the first cold-start load
+    // after boot doesn't pay the heavy GROUP-BY (fire-and-forget; it self-heals
+    // via stale-while-revalidate if this races an early request).
+    void prewarmColdStart(this.ctx)
     this.server = this.app.listen(this.cfg.port, this.cfg.listenhost)
     await events.once(this.server, 'listening')
     return this.server
