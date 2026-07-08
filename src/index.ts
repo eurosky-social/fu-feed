@@ -73,6 +73,7 @@ const run = async () => {
       'https://public.api.bsky.app',
     publisherDid:
       maybeStr(process.env.FEEDGEN_PUBLISHER_DID) ?? 'did:example:alice',
+    pickerDid: maybeStr(process.env.FEEDGEN_PICKER_DID),
     subscriptionReconnectDelay:
       maybeInt(process.env.FEEDGEN_SUBSCRIPTION_RECONNECT_DELAY) ?? 3000,
     rankerEngine:

@@ -26,6 +26,11 @@ export type Config = {
   hostname: string
   serviceDid: string
   publisherDid: string
+  // DID of the "picker" account that hosts the onboarding interest posts. Likes
+  // on its posts are exempt from the retention sweep so those posts stay durable
+  // hubs connecting interest-aligned users (see startRetentionSweep). Unset
+  // disables the exemption.
+  pickerDid?: string
   // Postgres connection string (pg-style URL).
   databaseUrl: string
   // Redis connection string used for the per-viewer ranked-list cache.
