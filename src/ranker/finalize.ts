@@ -1,5 +1,5 @@
 import { AppContext } from '../config'
-import { hydratePostMeta } from './hydrate'
+import { hydratePostMeta, readCachedMeta } from './hydrate'
 import { ContentFilter } from './types'
 
 export type FinalizeOptions = {
@@ -19,6 +19,50 @@ export type FinalizeOptions = {
   viewerDid?: string | null
 }
 
+// Chooses which candidates are worth a hydration round-trip.
+//
+// The main feed hydrates its whole candidate set (maxCandidates, ~1.5k) and is
+// fine. Content-typed feeds ask the ranker for maxCandidates ×
+// mediaCandidateMultiplier candidates precisely because media is a small slice
+// of all posts — measured in production, ~2.6% of an eligible candidate set is
+// video. Hydrating all of them meant thousands of getPosts calls per request in
+// bounded-concurrency waves, which overran the AppView's feed-fetch timeout and
+// left the image/video feeds serving a near-empty list.
+//
+// post_meta already knows the media kind of most candidates, and that fact is
+// immutable, so a stale row classifies just as well as a fresh one (see
+// readCachedMeta). Use it to discard non-matching candidates before touching
+// the network. Candidates post_meta has never seen cannot be classified without
+// a fetch, so they are kept in score order up to a budget — bounding the
+// worst case while still letting genuinely-new posts reach the feed. Their
+// media kind is checked as usual once hydrated.
+//
+// Every ranker inserts into rawScores in descending score order, so iterating
+// its keys preserves that order and the budget keeps the best unknowns.
+const urisToHydrate = async (
+  ctx: AppContext,
+  rawScores: Map<string, number>,
+  opts: FinalizeOptions,
+): Promise<string[]> => {
+  const all = [...rawScores.keys()]
+  if (opts.content === 'all') return all
+
+  const cached = await readCachedMeta(ctx, all)
+  const matching: string[] = []
+  const unknown: string[] = []
+  for (const uri of all) {
+    const meta = cached.get(uri)
+    if (!meta) {
+      unknown.push(uri)
+    } else if (opts.content === 'video' ? meta.is_video : meta.is_image) {
+      matching.push(uri)
+    }
+  }
+
+  const budget = ctx.cfg.ranking.mediaUnknownHydrationLimit
+  return budget > 0 ? matching.concat(unknown.slice(0, budget)) : matching
+}
+
 // Shared back half of every ranker: hydrate candidate metadata, apply
 // time-decay + freshness cap + adult/reply/content filters + popularity
 // penalty, then diversify per author and return the ordered URI list.
@@ -30,7 +74,10 @@ export const finalize = async (
   const cfg = ctx.cfg.ranking
   if (rawScores.size === 0) return []
 
-  const metas = await hydratePostMeta(ctx, [...rawScores.keys()])
+  const metas = await hydratePostMeta(
+    ctx,
+    await urisToHydrate(ctx, rawScores, opts),
+  )
   const now = Date.now()
   const freshnessMs = cfg.freshnessHours * 60 * 60 * 1000
   const langAllow =

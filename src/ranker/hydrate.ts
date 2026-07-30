@@ -24,6 +24,41 @@ const chunk = <T>(arr: T[], size: number): T[][] => {
   return out
 }
 
+// Reads whatever post_meta already holds for these URIs. Local only — never
+// calls the AppView, and applies no TTL.
+const readCachedRows = async (
+  ctx: AppContext,
+  uris: string[],
+): Promise<Map<string, Selectable<PostMeta>>> => {
+  const byUri = new Map<string, Selectable<PostMeta>>()
+  for (const batch of chunk(uris, DB_READ_CHUNK)) {
+    const rows = await ctx.db
+      .selectFrom('post_meta')
+      .selectAll()
+      .where('uri', 'in', batch)
+      .execute()
+    for (const row of rows) byUri.set(row.uri, row)
+  }
+  return byUri
+}
+
+// Classification-only lookup: what post_meta already knows, ignoring the
+// hydration TTL, with no network calls. Sound because every field except
+// like_count is immutable for a given post — a post's author, creation time,
+// media kind, reply-ness, language and labels do not change — so a stale row
+// classifies just as well as a fresh one. Callers that need an accurate
+// like_count must still run the URIs they keep through hydratePostMeta.
+export const readCachedMeta = async (
+  ctx: AppContext,
+  uris: string[],
+): Promise<Map<string, CandidateMeta>> => {
+  const out = new Map<string, CandidateMeta>()
+  if (uris.length === 0) return out
+  const rows = await readCachedRows(ctx, [...new Set(uris)])
+  for (const [uri, row] of rows) out.set(uri, toCandidateMeta(row))
+  return out
+}
+
 // Resolves metadata (createdAt / global likeCount / labels / quote-ness) for a
 // set of candidate post URIs. Hits the local post_meta cache first and only
 // calls the public AppView for misses or stale rows, then writes results back.
@@ -35,15 +70,7 @@ export const hydratePostMeta = async (
   if (uris.length === 0) return out
 
   const unique = [...new Set(uris)]
-  const cachedByUri = new Map<string, Selectable<PostMeta>>()
-  for (const batch of chunk(unique, DB_READ_CHUNK)) {
-    const rows = await ctx.db
-      .selectFrom('post_meta')
-      .selectAll()
-      .where('uri', 'in', batch)
-      .execute()
-    for (const row of rows) cachedByUri.set(row.uri, row)
-  }
+  const cachedByUri = await readCachedRows(ctx, unique)
 
   const freshCutoff = Date.now() - ctx.cfg.ranking.hydrationTtlMs
   const stale: string[] = []
