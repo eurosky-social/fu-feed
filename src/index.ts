@@ -46,6 +46,8 @@ const run = async () => {
     maxCandidates: maybeInt(process.env.FEEDGEN_MAX_CANDIDATES) ?? 500,
     mediaCandidateMultiplier:
       maybeInt(process.env.FEEDGEN_MEDIA_CANDIDATE_MULTIPLIER) ?? 8,
+    mediaUnknownHydrationLimit:
+      maybeInt(process.env.FEEDGEN_MEDIA_UNKNOWN_HYDRATION_LIMIT) ?? 1500,
     maxFeedSize: maybeInt(process.env.FEEDGEN_MAX_FEED_SIZE) ?? 1000,
     includeReplies: process.env.FEEDGEN_INCLUDE_REPLIES === 'true',
     perAuthorCap: maybeInt(process.env.FEEDGEN_PER_AUTHOR_CAP) ?? 3,

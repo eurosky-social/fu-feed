@@ -78,11 +78,18 @@ export class CsrLikeGraph implements ILikeGraph {
       const windowCutoff = new Date(
         Date.now() - this.cfg.windowHours * 60 * 60 * 1000,
       ).toISOString()
+      // Upper bound for the scan. We now page by indexed_at (ascending), so
+      // without a ceiling the scan would chase rows live ingestion appends
+      // while the build runs and never reach the end. Anchored to startedAt —
+      // the moment `pending` began buffering live creates — so every row is
+      // covered by exactly one of the two: scan (<= ceiling) or replay (>).
+      const buildCeiling = new Date(startedAt).toISOString()
 
       // pre-size edge staging from the actual row count to avoid power-of-two
       // over-allocation (count(*)::text avoids int overflow at 90d scale)
       const cnt = await sql<{ c: string }>`
-        SELECT count(*)::text AS c FROM likes WHERE indexed_at > ${windowCutoff}
+        SELECT count(*)::text AS c FROM likes
+        WHERE indexed_at > ${windowCutoff} AND indexed_at <= ${buildCeiling}
       `.execute(db)
       const approxE = Math.max(1 << 20, Math.ceil(Number(cnt.rows[0]?.c ?? 0) * 1.05))
       console.log(
@@ -98,24 +105,37 @@ export class CsrLikeGraph implements ILikeGraph {
       let fwdDeg = new Uint32Array(1 << 20)
       let revDeg = new Uint32Array(1 << 21)
       let E = 0
-      let lastLiker = ''
-      let lastCreated = ''
+      let lastIndexed = ''
       let lastUri = ''
       let first = true
       let nextLog = 1000000
 
+      // Page in indexed_at order, NOT liker_did order. `likes` is physically
+      // laid out in ingest order (measured on prod: correlation 0.999 for
+      // indexed_at vs 0.012 for liker_did), so paging by liker_did turned every
+      // row into a random fetch into a >100GB heap — the build went I/O-bound at
+      // ~17K edges/s and took ~8.5h, far longer than its own 2h rebuild
+      // interval. Paging by indexed_at reads the heap near-sequentially.
+      // (liker_did ordering is NOT needed for correctness: edges are staged flat
+      // and counting-sorted into CSR below.)
       for (;;) {
         let q = db
           .selectFrom('likes')
-          .select(['liker_did', 'subject_uri', 'created_at', 'uri'])
+          .select([
+            'liker_did',
+            'subject_uri',
+            'created_at',
+            'uri',
+            'indexed_at',
+          ])
           .where('indexed_at', '>', windowCutoff)
-          .orderBy('liker_did')
-          .orderBy('created_at')
+          .where('indexed_at', '<=', buildCeiling)
+          .orderBy('indexed_at')
           .orderBy('uri')
           .limit(BUILD_PAGE)
         if (!first) {
           q = q.where(
-            sql<boolean>`(liker_did, created_at, uri) > (${lastLiker}, ${lastCreated}, ${lastUri})`,
+            sql<boolean>`(indexed_at, uri) > (${lastIndexed}, ${lastUri})`,
           )
         }
         const rows = await q.execute()
@@ -151,8 +171,7 @@ export class CsrLikeGraph implements ILikeGraph {
         }
 
         const last = rows[rows.length - 1]
-        lastLiker = last.liker_did
-        lastCreated = last.created_at
+        lastIndexed = last.indexed_at
         lastUri = last.uri
         first = false
         if (rows.length < BUILD_PAGE) break
@@ -181,6 +200,17 @@ export class CsrLikeGraph implements ILikeGraph {
         const p = edgePost[i]
         revUser[revCur[p]++] = u
       }
+
+      // The scatter above is a stable counting sort, so each user's slice
+      // inherits the scan order. score() walks a user's slice from the end and
+      // breaks at the first like older than the candidate window, which is only
+      // correct while the slice ascends by like time. Ingest order matches like
+      // order for firehose likes but NOT for backfilled ones (recent
+      // indexed_at, historical created_at) — those would land at the end of the
+      // slice and truncate the traversal on its first step. Restore the
+      // invariant explicitly. (revUser needs no ordering: it is accumulated
+      // forward under a scan cap with no time-based break.)
+      sortSlicesByTs(fwdOff, fwdPost, fwdTs, U)
 
       // swap in the new base
       this.userI = userI
@@ -418,6 +448,73 @@ export class CsrLikeGraph implements ILikeGraph {
   private revDegree(p: number): number {
     const base = p < this.basePosts ? this.revOff[p + 1] - this.revOff[p] : 0
     return base + (this.deltaRev.get(p)?.length ?? 0)
+  }
+}
+
+// Slices at or below this length use insertion sort; longer ones use an index
+// sort, so a heavily-backfilled high-degree user can't hit insertion sort's
+// quadratic worst case.
+const INSERTION_MAX = 64
+
+// Sorts every user's CSR slice ascending by timestamp, keeping `post` aligned
+// with `ts`. Slices are already ascending in the overwhelmingly common case
+// (ingest order == like order), so the sortedness check short-circuits nearly
+// every user and this is effectively one linear pass over the edges.
+const sortSlicesByTs = (
+  off: Uint32Array,
+  post: Uint32Array,
+  ts: Uint32Array,
+  users: number,
+): void => {
+  let idx = new Uint32Array(0)
+  let bufPost = new Uint32Array(0)
+  let bufTs = new Uint32Array(0)
+
+  for (let u = 0; u < users; u++) {
+    const lo = off[u]
+    const hi = off[u + 1]
+    const n = hi - lo
+    if (n < 2) continue
+
+    let sorted = true
+    for (let i = lo + 1; i < hi; i++) {
+      if (ts[i] < ts[i - 1]) {
+        sorted = false
+        break
+      }
+    }
+    if (sorted) continue
+
+    if (n <= INSERTION_MAX) {
+      for (let i = lo + 1; i < hi; i++) {
+        const t = ts[i]
+        const p = post[i]
+        let j = i - 1
+        while (j >= lo && ts[j] > t) {
+          ts[j + 1] = ts[j]
+          post[j + 1] = post[j]
+          j--
+        }
+        ts[j + 1] = t
+        post[j + 1] = p
+      }
+      continue
+    }
+
+    if (idx.length < n) {
+      idx = new Uint32Array(n)
+      bufPost = new Uint32Array(n)
+      bufTs = new Uint32Array(n)
+    }
+    const order = idx.subarray(0, n)
+    for (let i = 0; i < n; i++) order[i] = i
+    order.sort((a, b) => ts[lo + a] - ts[lo + b])
+    for (let i = 0; i < n; i++) {
+      bufPost[i] = post[lo + order[i]]
+      bufTs[i] = ts[lo + order[i]]
+    }
+    post.set(bufPost.subarray(0, n), lo)
+    ts.set(bufTs.subarray(0, n), lo)
   }
 }
 

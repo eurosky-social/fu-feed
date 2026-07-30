@@ -123,6 +123,14 @@ export type RankingConfig = {
   // enough survive the media filter (media is a fraction of all posts). Applied
   // only when content !== 'all'; 1 = off.
   mediaCandidateMultiplier: number
+  // On content-typed feeds, candidates whose media kind post_meta has never
+  // recorded can only be classified by hydrating them. This caps how many such
+  // unknowns are fetched per request (highest-scoring first); candidates
+  // post_meta already knows about are filtered locally and cost nothing. Keeps
+  // the AppView fan-out bounded instead of scaling with the over-generated
+  // candidate set. 0 = never hydrate unknowns (serve only already-known media).
+  // Env: FEEDGEN_MEDIA_UNKNOWN_HYDRATION_LIMIT.
+  mediaUnknownHydrationLimit: number
   // maximum length of the ranked list cached per viewer
   maxFeedSize: number
   // include reply posts? Default false — top-level posts only
