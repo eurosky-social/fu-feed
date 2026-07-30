@@ -10,7 +10,8 @@
     "createInterestPosts": "ts-node src/tools/createInterestPosts.ts",
     "start": "ts-node src/index.ts",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --require ts-node/register --test test/**/*.test.ts"
   },
   "dependencies": {
     "@atproto/api": "^0.13.28",
