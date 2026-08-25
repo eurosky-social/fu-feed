@@ -270,8 +270,9 @@ export const backfillSeedColikers = async (
       SELECT MIN(indexed_at) AS oldest FROM likes
     `.execute(ctx.db)
     const oldest = span.rows[0]?.oldest
-    if (oldest) {
-      const spanHours = (Date.now() - Date.parse(oldest)) / (60 * 60 * 1000)
+    const ingestStartMs = oldest ? Date.parse(oldest) : null
+    if (ingestStartMs !== null) {
+      const spanHours = (Date.now() - ingestStartMs) / (60 * 60 * 1000)
       if (spanHours >= ctx.cfg.retentionHours) return
     }
 
@@ -293,11 +294,34 @@ export const backfillSeedColikers = async (
     }
     if (seedPosts.length === 0) return
 
+    // Per-post form of the cold-start gate above.
+    //
+    // A post created after ingestion began cannot have a liker we missed: every
+    // like on it was emitted on the firehose while we were listening. Fetching
+    // its likers can only return rows we already hold.
+    //
+    // `backfillPostLikers` alone does not catch this — its COVERAGE_CAP skip is
+    // an absolute threshold ("already have >=2000 likers"), not a coverage one,
+    // so a brand-new post with 50 likes we ingested ourselves still costs a
+    // getLikes round trip that returns nothing new. Most posts are under the cap,
+    // so most of the work was this.
+    //
+    // Same assumption as the global gate: continuous ingestion. A prolonged
+    // firehose outage would leave a hole this cannot see — as it would for the
+    // gate above — which is why only posts we can *prove* predate nothing are
+    // skipped, and anything without post metadata still gets fetched.
+    const skippablePosts = await postsFullyCoveredByIngestion(
+      ctx,
+      seedPosts,
+      ingestStartMs,
+    )
+    const postsToDensify = seedPosts.filter((uri) => !skippablePosts.has(uri))
+
     const windowCutoffMs = Date.now() - ctx.cfg.retentionHours * 60 * 60 * 1000
     let inserted = 0
     let densified = 0
-    for (let i = 0; i < seedPosts.length; i += COLIKER_CONCURRENCY) {
-      const batch = seedPosts.slice(i, i + COLIKER_CONCURRENCY)
+    for (let i = 0; i < postsToDensify.length; i += COLIKER_CONCURRENCY) {
+      const batch = postsToDensify.slice(i, i + COLIKER_CONCURRENCY)
       const counts = await Promise.all(
         batch.map((uri) =>
           backfillPostLikers(ctx, uri, windowCutoffMs, cfg.maxPages),
@@ -311,8 +335,9 @@ export const backfillSeedColikers = async (
 
     if (inserted > 0) await invalidateViewerCache(ctx, viewerDid)
     console.log(
-      `⤓ co-liker backfill: ${viewerDid} densified ${densified}/${seedPosts.length} ` +
-        `seed posts (+${inserted} likes)`,
+      `⤓ co-liker backfill: ${viewerDid} densified ${densified}/${postsToDensify.length} ` +
+        `seed posts (+${inserted} likes, ${skippablePosts.size} skipped: ` +
+        `post newer than ingestion)`,
     )
   } catch (err) {
     console.error(`co-liker backfill failed for ${viewerDid}`, err)
@@ -322,6 +347,29 @@ export const backfillSeedColikers = async (
       /* ignore */
     }
   }
+}
+
+// Of `postUris`, those we can prove we hold every liker for: posts created after
+// ingestion started. Returns an empty set when that cannot be established (no
+// ingestion start, or no cached post metadata), so the caller falls back to
+// fetching — this only ever skips work it can justify.
+const postsFullyCoveredByIngestion = async (
+  ctx: AppContext,
+  postUris: string[],
+  ingestStartMs: number | null,
+): Promise<Set<string>> => {
+  const covered = new Set<string>()
+  if (ingestStartMs === null || postUris.length === 0) return covered
+  const rows = await ctx.db
+    .selectFrom('post_meta')
+    .select(['uri', 'created_at'])
+    .where('uri', 'in', postUris)
+    .execute()
+  for (const row of rows) {
+    const createdMs = Date.parse(row.created_at)
+    if (!isNaN(createdMs) && createdMs > ingestStartMs) covered.add(row.uri)
+  }
+  return covered
 }
 
 // Imports the in-window likers of a single post from the AppView, skipping any
