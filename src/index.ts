@@ -57,6 +57,8 @@ const run = async () => {
       maybeInt(process.env.FEEDGEN_INLINE_BACKFILL_LIMIT) ?? 100,
     inlineBackfillDeadlineMs:
       maybeInt(process.env.FEEDGEN_INLINE_BACKFILL_DEADLINE_MS) ?? 1500,
+    hydrationDeadlineMs:
+      maybeInt(process.env.FEEDGEN_HYDRATION_DEADLINE_MS) ?? 4000,
     hydrationTtlMs:
       (maybeFloat(process.env.FEEDGEN_HYDRATION_TTL_HOURS) ?? 1) *
       60 *

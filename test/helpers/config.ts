@@ -29,6 +29,7 @@ export const rankingConfig = (
   cacheTtlSeconds: 900,
   inlineBackfillLimit: 100,
   inlineBackfillDeadlineMs: 1500,
+  hydrationDeadlineMs: 4000,
   hydrationTtlMs: 60 * 60 * 1000,
   popularityCacheTtlSeconds: 300,
   ...overrides,

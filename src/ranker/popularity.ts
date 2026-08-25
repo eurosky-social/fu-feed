@@ -15,7 +15,7 @@ type PopRow = { subject_uri: string; likes: number }
 // Module-level: the feed generator is a single process. Keyed by content filter
 // (the query's LIMIT differs for the image/video over-fetch).
 const popCache = new Map<ContentFilter, { rows: PopRow[]; at: number }>()
-const popInflight = new Set<ContentFilter>()
+const popInflight = new Map<ContentFilter, Promise<PopRow[]>>()
 
 const popQuery = async (
   ctx: AppContext,
@@ -43,12 +43,27 @@ const popQuery = async (
   return res.rows
 }
 
+// Single-flight, shared by the cold and the background-refresh paths. `popQuery`
+// is a heavy GROUP BY over the whole freshness window, and nothing populates
+// popCache until it finishes — so without this, every concurrent cold-start
+// request for the same content ran its own copy. Client retries make that
+// self-reinforcing: three retries of a request that is already too slow started
+// three more full computations.
+const popQueryOnce = (
+  ctx: AppContext,
+  content: ContentFilter,
+): Promise<PopRow[]> => {
+  const existing = popInflight.get(content)
+  if (existing) return existing
+  const p = popQuery(ctx, content).finally(() => popInflight.delete(content))
+  popInflight.set(content, p)
+  return p
+}
+
 const refreshInBackground = (ctx: AppContext, content: ContentFilter): void => {
-  if (popInflight.has(content)) return
-  popInflight.add(content)
-  void popQuery(ctx, content)
-    .catch((err) => console.error('[foryou] popularity refresh failed', err))
-    .finally(() => popInflight.delete(content))
+  void popQueryOnce(ctx, content).catch((err) =>
+    console.error('[foryou] popularity refresh failed', err),
+  )
 }
 
 // Cold-start ranker for anonymous viewers and users with no likes yet: the
@@ -59,8 +74,18 @@ export class PopularityRanker implements Ranker {
   // Pre-compute the shared cold-start set (e.g. at server start) so the first
   // cold-start request after boot doesn't pay the query.
   async warm(ctx: AppContext): Promise<void> {
-    await popQuery(ctx, 'all').catch((err) =>
-      console.error('[foryou] popularity warm failed', err),
+    // popCache is keyed by content filter, so warming only 'all' left every
+    // content-typed feed cold after each restart or deploy — and their cold
+    // path is the expensive one, because it over-fetches by
+    // mediaCandidateMultiplier. Warm one entry per distinct filter actually
+    // served.
+    const contents = [...new Set(ctx.cfg.feeds.map((f) => f.content))]
+    await Promise.all(
+      contents.map((content) =>
+        popQueryOnce(ctx, content).catch((err) =>
+          console.error(`[foryou] popularity warm failed (${content})`, err),
+        ),
+      ),
     )
   }
 
@@ -79,7 +104,7 @@ export class PopularityRanker implements Ranker {
       rows = entry.rows // stale: serve now, refresh in the background
       refreshInBackground(ctx, content)
     } else {
-      rows = await popQuery(ctx, content) // cold: compute once, inline
+      rows = await popQueryOnce(ctx, content) // cold: compute once, inline
     }
 
     const rawScores = new Map<string, number>()

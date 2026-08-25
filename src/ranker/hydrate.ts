@@ -17,6 +17,17 @@ const DB_WRITE_CHUNK = 2000 // 2000 rows × 11 cols = 22000 params, under 65535
 // all at once hammers the public AppView (socket exhaustion / rate limits).
 const APPVIEW_CONCURRENCY = 20
 
+// Abandon an individual getPosts call after this long.
+//
+// Measured against public.api.bsky.app, 120 calls at this concurrency:
+// p50 150ms, p90 550ms, p99 880ms — and one call in 120 that hung for 30.6s,
+// with no 429s and no errors. The AppView is not throttling us; roughly 1% of
+// requests simply never come back in reasonable time.
+//
+// That single straggler is what made hydration slow. Any timeout well above p99
+// costs effectively nothing and removes the tail.
+const APPVIEW_REQUEST_TIMEOUT_MS = 5000
+
 // Splits an array into fixed-size batches (the last may be shorter).
 const chunk = <T>(arr: T[], size: number): T[][] => {
   const out: T[][] = []
@@ -80,6 +91,13 @@ export const hydratePostMeta = async (
     if (row && Date.parse(row.hydrated_at) >= freshCutoff) {
       out.set(uri, toCandidateMeta(row))
     } else {
+      // A stale row is still a usable answer: every field except like_count is
+      // immutable for a given post (see readCachedMeta). Seed `out` with it and
+      // let the refetch below overwrite it if it gets that far. Without this,
+      // a candidate whose row merely aged past hydrationTtlMs (1h) was dropped
+      // from the feed unless the AppView answered — which is what made a
+      // request either block on thousands of getPosts calls or serve nothing.
+      if (row) out.set(uri, toCandidateMeta(row))
       stale.push(uri)
     }
   }
@@ -139,22 +157,63 @@ const fetchFromAppview = async (
   const results: CandidateMeta[] = []
   const postChunks = chunk(uris, GET_POSTS_CHUNK)
 
-  // Fire the getPosts calls in bounded-concurrency waves so a large candidate
-  // set (hundreds of chunks) doesn't blast the public AppView all at once.
+  // Stop fetching once the budget is spent and serve what we have. A media feed
+  // over-generates maxCandidates × mediaCandidateMultiplier (4000 by default)
+  // candidates, and on a cold post_meta essentially all of them need fetching:
+  // 1500 URIs is 60 getPosts calls, which the public AppView throttles hard
+  // enough that a single request was measured at 116s and the PDS gave up on it
+  // with a 502 long before that. A thinner feed is strictly better than a feed
+  // that times out — and thanks to the write-back below, each request that ends
+  // early still leaves post_meta warmer for the next one.
+  const deadline = Date.now() + ctx.cfg.ranking.hydrationDeadlineMs
+
+  // A fixed pool of workers pulling from a shared cursor, rather than
+  // Promise.all over fixed waves of APPVIEW_CONCURRENCY.
+  //
+  // Waves are a barrier: the wave takes as long as its slowest member, so one
+  // 30s straggler left 19 workers idle and stalled every chunk behind it. With
+  // ~1% of calls hanging (see APPVIEW_REQUEST_TIMEOUT_MS), a 60-chunk request
+  // hit that on most runs — which is what turned a job worth about a second of
+  // work into the ~110s that made the PDS give up with a 502.
   const responses: any[][] = []
-  for (const wave of chunk(postChunks, APPVIEW_CONCURRENCY)) {
-    const waveResults = await Promise.all(
-      wave.map((uriChunk) =>
-        ctx.publicAgent.app.bsky.feed
-          .getPosts({ uris: uriChunk })
-          .then((res) => res.data.posts)
-          .catch((err) => {
-            console.error('getPosts hydration failed', err)
-            return []
-          }),
-      ),
+  let next = 0
+  let timedOut = 0
+  const worker = async (): Promise<void> => {
+    while (true) {
+      if (Date.now() > deadline) return
+      const i = next++
+      if (i >= postChunks.length) return
+      const uriChunk = postChunks[i]
+      const controller = new AbortController()
+      const timer = setTimeout(
+        () => controller.abort(),
+        APPVIEW_REQUEST_TIMEOUT_MS,
+      )
+      try {
+        const res = await ctx.publicAgent.app.bsky.feed.getPosts(
+          { uris: uriChunk },
+          { signal: controller.signal },
+        )
+        responses.push(res.data.posts)
+      } catch (err) {
+        if (controller.signal.aborted) timedOut++
+        else console.error('getPosts hydration failed', err)
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(APPVIEW_CONCURRENCY, postChunks.length) }, () =>
+      worker(),
+    ),
+  )
+  if (next < postChunks.length || timedOut > 0) {
+    console.warn(
+      `[foryou] hydration incomplete — ${responses.length}/${postChunks.length} chunks fetched` +
+        (timedOut > 0 ? `, ${timedOut} timed out` : '') +
+        (next < postChunks.length ? ' (deadline)' : ''),
     )
-    responses.push(...waveResults)
   }
 
   for (const posts of responses) {

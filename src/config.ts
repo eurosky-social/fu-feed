@@ -131,6 +131,13 @@ export type RankingConfig = {
   // candidate set. 0 = never hydrate unknowns (serve only already-known media).
   // Env: FEEDGEN_MEDIA_UNKNOWN_HYDRATION_LIMIT.
   mediaUnknownHydrationLimit: number
+  // Wall-clock budget for the AppView hydration fan-out within one request. The
+  // count-based limits above bound how many URIs are *eligible* to be fetched;
+  // this bounds how long actually fetching them may take, which is what the
+  // AppView's own feed timeout cares about. On expiry the request serves what
+  // it has (cached rows included) instead of blocking.
+  // Env: FEEDGEN_HYDRATION_DEADLINE_MS.
+  hydrationDeadlineMs: number
   // maximum length of the ranked list cached per viewer
   maxFeedSize: number
   // include reply posts? Default false — top-level posts only
