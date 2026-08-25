@@ -20,6 +20,20 @@ export const isInternable = (s: string): boolean => {
 // large retention windows. Each key is stored wholly within one chunk (a new
 // chunk is started rather than straddling), so reads touch a single chunk.
 //
+// Transferable representation of an interner — see `toSnapshot`.
+export type ArenaInternerSnapshot = {
+  chunkSize: number
+  chunks: Uint8Array[]
+  curChunk: number
+  curPos: number
+  keyChunk: Uint32Array
+  keyStart: Uint32Array
+  keyLen: Uint16Array
+  slots: Int32Array
+  mask: number
+  count: number
+}
+
 // Callers MUST pass only isInternable() keys (ASCII, ≤ MAX_KEY_LEN).
 export class ArenaInterner {
   private readonly chunkSize: number
@@ -32,6 +46,53 @@ export class ArenaInterner {
   private slots: Int32Array // hash table: id at slot, -1 = empty
   private mask: number
   count = 0
+
+  // Everything the interner is: five typed-array stores plus five scalars.
+  // Exposed so a graph built in a worker thread can be moved to the main thread
+  // by transferring the backing buffers rather than re-interning hundreds of
+  // millions of keys (which is the expensive half of a build).
+  toSnapshot(): ArenaInternerSnapshot {
+    return {
+      chunkSize: this.chunkSize,
+      chunks: this.chunks,
+      curChunk: this.curChunk,
+      curPos: this.curPos,
+      keyChunk: this.keyChunk,
+      keyStart: this.keyStart,
+      keyLen: this.keyLen,
+      slots: this.slots,
+      mask: this.mask,
+      count: this.count,
+    }
+  }
+
+  // Rebuilds an interner from `toSnapshot()` output. The hash table is carried
+  // over as-is, so this is O(1) — no re-hashing. Only sound for a snapshot this
+  // class produced; the slot array must already agree with the stored keys.
+  static fromSnapshot(snap: ArenaInternerSnapshot): ArenaInterner {
+    const interner = new ArenaInterner(1, snap.chunkSize)
+    interner.chunks = snap.chunks
+    interner.curChunk = snap.curChunk
+    interner.curPos = snap.curPos
+    interner.keyChunk = snap.keyChunk
+    interner.keyStart = snap.keyStart
+    interner.keyLen = snap.keyLen
+    interner.slots = snap.slots
+    interner.mask = snap.mask
+    interner.count = snap.count
+    return interner
+  }
+
+  // The ArrayBuffers behind a snapshot, for a worker postMessage transfer list.
+  static buffersOf(snap: ArenaInternerSnapshot): ArrayBuffer[] {
+    return [
+      ...snap.chunks.map((c) => c.buffer as ArrayBuffer),
+      snap.keyChunk.buffer as ArrayBuffer,
+      snap.keyStart.buffer as ArrayBuffer,
+      snap.keyLen.buffer as ArrayBuffer,
+      snap.slots.buffer as ArrayBuffer,
+    ]
+  }
 
   constructor(expectedKeys = 1024, chunkSize = 1 << 28 /* 256 MB */) {
     this.chunkSize = chunkSize

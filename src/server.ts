@@ -55,7 +55,7 @@ export class FeedGenerator {
     const graph: ILikeGraph | undefined =
       cfg.rankerEngine === 'graph'
         ? cfg.graph.layout === 'csr'
-          ? new CsrLikeGraph(cfg.graph)
+          ? new CsrLikeGraph(cfg.graph, cfg.databaseUrl)
           : new LikeGraph(cfg.graph)
         : undefined
     const ingester = new LikesIngester(
@@ -102,8 +102,46 @@ export class FeedGenerator {
     return new FeedGenerator(app, db, redis, ingester, graph, cfg, ctx)
   }
 
+  // Postgres may not be resolvable yet when this process starts.
+  //
+  // The compose file does declare `depends_on: condition: service_healthy` for
+  // both postgres and redis, but that only orders the *initial* `compose up`.
+  // Observed on a deploy: the app container was created 38s before its
+  // dependencies even existed, crashed five times with
+  // `getaddrinfo ENOTFOUND foreu-postgres-production`, and only survived once
+  // the database happened to be up — because Docker's `restart: unless-stopped`
+  // restarts a container without re-evaluating `depends_on`.
+  //
+  // Crashing on a dependency that is merely not ready yet is the wrong default
+  // for a service that is always restarted anyway: it turns an orderly wait into
+  // a crash loop, burns RestartCount so a genuine crash is harder to spot, and
+  // costs a minute of downtime on every deploy. Wait for it instead.
+  private async migrateWithRetry(): Promise<void> {
+    const startedAt = Date.now()
+    const budgetMs = 60_000
+    let attempt = 0
+    for (;;) {
+      try {
+        await migrateToLatest(this.db)
+        if (attempt > 0) {
+          console.log(`[foryou] database reachable after ${attempt} retries`)
+        }
+        return
+      } catch (err) {
+        if (Date.now() - startedAt > budgetMs) throw err
+        attempt++
+        const delayMs = Math.min(1000 * attempt, 5000)
+        console.warn(
+          `[foryou] database not ready (attempt ${attempt}), retrying in ${delayMs}ms:`,
+          err instanceof Error ? err.message : err,
+        )
+        await new Promise((r) => setTimeout(r, delayMs))
+      }
+    }
+  }
+
   async start(): Promise<http.Server> {
-    await migrateToLatest(this.db)
+    await this.migrateWithRetry()
     // Build the in-memory graph in the background; until ready, requests fall
     // back to the cold-start popularity feed. The boot build retries with
     // backoff (a transient DB hiccup must not leave the graph cold until the

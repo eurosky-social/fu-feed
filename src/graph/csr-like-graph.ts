@@ -1,18 +1,10 @@
-import { sql } from 'kysely'
+import path from 'path'
 import { Database } from '../db'
 import { GraphConfig, RankingConfig } from '../config'
 import { ILikeGraph } from './types'
 import { ArenaInterner, isInternable } from './arena-interner'
-
-const EPOCH_MS = Date.UTC(2020, 0, 1)
-const FUTURE_SKEW_MS = 5 * 60000
-const toTsMin = (ms: number): number => {
-  const cap = Date.now() + FUTURE_SKEW_MS
-  const clamped = ms > cap ? cap : ms
-  const m = Math.floor((clamped - EPOCH_MS) / 60000)
-  return m > 0 ? m : 0
-}
-const BUILD_PAGE = 100000
+import { BuildWorkerInput } from './build-worker'
+import { CsrSnapshot, buildCsrSnapshot, toTsMin } from './csr-build'
 
 // The like graph as Compressed-Sparse-Row typed arrays + arena interners (see
 // arena-interner.ts). More compact than the Map-based LikeGraph (no per-node
@@ -42,7 +34,15 @@ export class CsrLikeGraph implements ILikeGraph {
   private deltaRev = new Map<number, number[]>() // [user, …]
   private pending: Array<[string, string, number]> | null = null
 
-  constructor(private readonly cfg: GraphConfig) {}
+  constructor(
+    private readonly cfg: GraphConfig,
+    // Connection string for the build worker's own pool: a Kysely/pg pool
+    // belongs to the thread that created it and cannot be shared across
+    // threads. Omit it to build on this thread against the `db` handed to
+    // `buildFromPostgres` instead — which is what tests do, since a worker
+    // would ignore their fake database and dial a real one.
+    private readonly databaseUrl?: string,
+  ) {}
 
   applyCreate(likerDid: string, subjectUri: string, createdAtMs: number): void {
     if (!this.ready) return
@@ -75,153 +75,28 @@ export class CsrLikeGraph implements ILikeGraph {
     if (this.ready) this.pending = []
     const startedAt = Date.now()
     try {
-      const windowCutoff = new Date(
-        Date.now() - this.cfg.windowHours * 60 * 60 * 1000,
-      ).toISOString()
-      // Upper bound for the scan. We now page by indexed_at (ascending), so
-      // without a ceiling the scan would chase rows live ingestion appends
-      // while the build runs and never reach the end. Anchored to startedAt —
-      // the moment `pending` began buffering live creates — so every row is
-      // covered by exactly one of the two: scan (<= ceiling) or replay (>).
-      const buildCeiling = new Date(startedAt).toISOString()
+      // Build off-thread. Everything up to this point is bookkeeping; the work
+      // itself — interning every key and counting-sorting the edges — is what
+      // used to starve the event loop. See build-worker.ts.
+      //
+      // `startedAt` is the ceiling for the scan AND the moment `pending` began
+      // buffering, so every row lands in exactly one of the two: the scan or the
+      // replay below.
+      const snapshot = await this.runBuildWorker(db, startedAt)
 
-      // pre-size edge staging from the actual row count to avoid power-of-two
-      // over-allocation (count(*)::text avoids int overflow at 90d scale)
-      const cnt = await sql<{ c: string }>`
-        SELECT count(*)::text AS c FROM likes
-        WHERE indexed_at > ${windowCutoff} AND indexed_at <= ${buildCeiling}
-      `.execute(db)
-      const approxE = Math.max(1 << 20, Math.ceil(Number(cnt.rows[0]?.c ?? 0) * 1.05))
-      console.log(
-        `🧠 like-graph (csr) build started: ~${Number(cnt.rows[0]?.c ?? 0)} edges to load…`,
-      )
-
-      const userI = new ArenaInterner(1 << 20)
-      const postI = new ArenaInterner(1 << 21)
-      // accumulate edges (single consistent pass) then counting-sort to CSR
-      let edgeU = new Uint32Array(approxE)
-      let edgePost = new Uint32Array(approxE)
-      let edgeTs = new Uint32Array(approxE)
-      let fwdDeg = new Uint32Array(1 << 20)
-      let revDeg = new Uint32Array(1 << 21)
-      let E = 0
-      let lastIndexed = ''
-      let lastUri = ''
-      let first = true
-      let nextLog = 1000000
-
-      // Page in indexed_at order, NOT liker_did order. `likes` is physically
-      // laid out in ingest order (measured on prod: correlation 0.999 for
-      // indexed_at vs 0.012 for liker_did), so paging by liker_did turned every
-      // row into a random fetch into a >100GB heap — the build went I/O-bound at
-      // ~17K edges/s and took ~8.5h, far longer than its own 2h rebuild
-      // interval. Paging by indexed_at reads the heap near-sequentially.
-      // (liker_did ordering is NOT needed for correctness: edges are staged flat
-      // and counting-sorted into CSR below.)
-      for (;;) {
-        let q = db
-          .selectFrom('likes')
-          .select([
-            'liker_did',
-            'subject_uri',
-            'created_at',
-            'uri',
-            'indexed_at',
-          ])
-          .where('indexed_at', '>', windowCutoff)
-          .where('indexed_at', '<=', buildCeiling)
-          .orderBy('indexed_at')
-          .orderBy('uri')
-          .limit(BUILD_PAGE)
-        if (!first) {
-          q = q.where(
-            sql<boolean>`(indexed_at, uri) > (${lastIndexed}, ${lastUri})`,
-          )
-        }
-        const rows = await q.execute()
-        if (rows.length === 0) break
-
-        for (const r of rows) {
-          const ms = Date.parse(r.created_at)
-          if (isNaN(ms)) continue
-          if (!isInternable(r.subject_uri)) continue // skip malformed URIs
-          const u = userI.intern(r.liker_did)
-          const p = postI.intern(r.subject_uri)
-          if (E >= edgeU.length) {
-            edgeU = growU32(edgeU, E + 1)
-            edgePost = growU32(edgePost, E + 1)
-            edgeTs = growU32(edgeTs, E + 1)
-          }
-          edgeU[E] = u
-          edgePost[E] = p
-          edgeTs[E] = toTsMin(ms)
-          E++
-          if (u >= fwdDeg.length) fwdDeg = growU32(fwdDeg, u + 1)
-          if (p >= revDeg.length) revDeg = growU32(revDeg, p + 1)
-          fwdDeg[u]++
-          revDeg[p]++
-        }
-
-        if (E >= nextLog) {
-          console.log(
-            `🧠 like-graph (csr) building… ${E} edges ` +
-              `(~${Math.round((E / approxE) * 100)}%)`,
-          )
-          nextLog += 1000000
-        }
-
-        const last = rows[rows.length - 1]
-        lastIndexed = last.indexed_at
-        lastUri = last.uri
-        first = false
-        if (rows.length < BUILD_PAGE) break
-        await new Promise((res) => setImmediate(res))
-      }
-
-      const U = userI.count
-      const P = postI.count
-
-      // prefix-sum offsets
-      const fwdOff = new Uint32Array(U + 1)
-      for (let u = 0; u < U; u++) fwdOff[u + 1] = fwdOff[u] + (fwdDeg[u] || 0)
-      const revOff = new Uint32Array(P + 1)
-      for (let p = 0; p < P; p++) revOff[p + 1] = revOff[p] + (revDeg[p] || 0)
-
-      const fwdPost = new Uint32Array(E)
-      const fwdTs = new Uint32Array(E)
-      const revUser = new Uint32Array(E)
-      const fwdCur = fwdOff.slice(0, U) // mutable write cursors
-      const revCur = revOff.slice(0, P)
-      for (let i = 0; i < E; i++) {
-        const u = edgeU[i]
-        const fc = fwdCur[u]++
-        fwdPost[fc] = edgePost[i]
-        fwdTs[fc] = edgeTs[i]
-        const p = edgePost[i]
-        revUser[revCur[p]++] = u
-      }
-
-      // The scatter above is a stable counting sort, so each user's slice
-      // inherits the scan order. score() walks a user's slice from the end and
-      // breaks at the first like older than the candidate window, which is only
-      // correct while the slice ascends by like time. Ingest order matches like
-      // order for firehose likes but NOT for backfilled ones (recent
-      // indexed_at, historical created_at) — those would land at the end of the
-      // slice and truncate the traversal on its first step. Restore the
-      // invariant explicitly. (revUser needs no ordering: it is accumulated
-      // forward under a scan cap with no time-based break.)
-      sortSlicesByTs(fwdOff, fwdPost, fwdTs, U)
+      const userI = ArenaInterner.fromSnapshot(snapshot.userI)
+      const postI = ArenaInterner.fromSnapshot(snapshot.postI)
 
       // swap in the new base
       this.userI = userI
       this.postI = postI
-      this.fwdOff = fwdOff
-      this.fwdPost = fwdPost
-      this.fwdTs = fwdTs
-      this.revOff = revOff
-      this.revUser = revUser
-      this.baseUsers = U
-      this.basePosts = P
+      this.fwdOff = snapshot.fwdOff
+      this.fwdPost = snapshot.fwdPost
+      this.fwdTs = snapshot.fwdTs
+      this.revOff = snapshot.revOff
+      this.revUser = snapshot.revUser
+      this.baseUsers = snapshot.users
+      this.basePosts = snapshot.posts
       this.deltaFwd = new Map()
       this.deltaRev = new Map()
       this.ready = true
@@ -249,8 +124,9 @@ export class CsrLikeGraph implements ILikeGraph {
       }
 
       console.log(
-        `🧠 like-graph (csr) built: ${U} users, ${P} posts, ${E} edges ` +
-          `(+${replayed} live) in ${Math.round((Date.now() - startedAt) / 1000)}s`,
+        `🧠 like-graph (csr) built: ${snapshot.users} users, ${snapshot.posts} posts, ` +
+          `${snapshot.edges} edges (+${replayed} live) in ` +
+          `${Math.round((Date.now() - startedAt) / 1000)}s`,
       )
       return true
     } catch (err) {
@@ -260,6 +136,70 @@ export class CsrLikeGraph implements ILikeGraph {
       this.pending = null
       this.building = false
     }
+  }
+
+  // Runs the build in a worker thread, falling back to this thread if a worker
+  // cannot be started at all.
+  //
+  // The fallback exists because a cold graph is worse than a slow one: with no
+  // base to serve from, every viewer drops to the cold-start popularity feed. If
+  // worker_threads is unavailable for some reason, taking the latency hit beats
+  // never building. A worker that starts and then *fails* is a real error and
+  // propagates — it must not be silently retried inline, or a reproducible build
+  // failure would pin the event loop on every rebuild tick.
+  private async runBuildWorker(
+    db: Database,
+    buildCeilingMs: number,
+  ): Promise<CsrSnapshot> {
+    if (!this.databaseUrl) {
+      return buildCsrSnapshot(db, this.cfg, buildCeilingMs)
+    }
+
+    let Worker: typeof import('worker_threads').Worker
+    try {
+      ;({ Worker } = await import('worker_threads'))
+    } catch {
+      console.warn(
+        '🧠 like-graph: worker_threads unavailable — building on the main thread',
+      )
+      return buildCsrSnapshot(db, this.cfg, buildCeilingMs)
+    }
+
+    // ts-node in development runs the .ts sources; the container runs the
+    // compiled output. Resolve the sibling worker in whichever form we are.
+    const isTs = __filename.endsWith('.ts')
+    const workerPath = path.join(
+      __dirname,
+      isTs ? 'build-worker.ts' : 'build-worker.js',
+    )
+    const input: BuildWorkerInput = {
+      databaseUrl: this.databaseUrl,
+      graph: this.cfg,
+      buildCeilingMs,
+    }
+
+    return new Promise<CsrSnapshot>((resolve, reject) => {
+      const worker = new Worker(workerPath, {
+        workerData: input,
+        ...(isTs ? { execArgv: ['--require', 'ts-node/register'] } : {}),
+      })
+      let settled = false
+      worker.on('message', (msg: { ok: boolean; snapshot?: CsrSnapshot; error?: string }) => {
+        settled = true
+        if (msg.ok && msg.snapshot) resolve(msg.snapshot)
+        else reject(new Error(msg.error ?? 'graph build worker reported failure'))
+        void worker.terminate()
+      })
+      worker.on('error', (err) => {
+        settled = true
+        reject(err)
+      })
+      worker.on('exit', (code) => {
+        if (!settled) {
+          reject(new Error(`graph build worker exited early with code ${code}`))
+        }
+      })
+    })
   }
 
   score(
@@ -460,69 +400,3 @@ const INSERTION_MAX = 64
 // with `ts`. Slices are already ascending in the overwhelmingly common case
 // (ingest order == like order), so the sortedness check short-circuits nearly
 // every user and this is effectively one linear pass over the edges.
-const sortSlicesByTs = (
-  off: Uint32Array,
-  post: Uint32Array,
-  ts: Uint32Array,
-  users: number,
-): void => {
-  let idx = new Uint32Array(0)
-  let bufPost = new Uint32Array(0)
-  let bufTs = new Uint32Array(0)
-
-  for (let u = 0; u < users; u++) {
-    const lo = off[u]
-    const hi = off[u + 1]
-    const n = hi - lo
-    if (n < 2) continue
-
-    let sorted = true
-    for (let i = lo + 1; i < hi; i++) {
-      if (ts[i] < ts[i - 1]) {
-        sorted = false
-        break
-      }
-    }
-    if (sorted) continue
-
-    if (n <= INSERTION_MAX) {
-      for (let i = lo + 1; i < hi; i++) {
-        const t = ts[i]
-        const p = post[i]
-        let j = i - 1
-        while (j >= lo && ts[j] > t) {
-          ts[j + 1] = ts[j]
-          post[j + 1] = post[j]
-          j--
-        }
-        ts[j + 1] = t
-        post[j + 1] = p
-      }
-      continue
-    }
-
-    if (idx.length < n) {
-      idx = new Uint32Array(n)
-      bufPost = new Uint32Array(n)
-      bufTs = new Uint32Array(n)
-    }
-    const order = idx.subarray(0, n)
-    for (let i = 0; i < n; i++) order[i] = i
-    order.sort((a, b) => ts[lo + a] - ts[lo + b])
-    for (let i = 0; i < n; i++) {
-      bufPost[i] = post[lo + order[i]]
-      bufTs[i] = ts[lo + order[i]]
-    }
-    post.set(bufPost.subarray(0, n), lo)
-    ts.set(bufTs.subarray(0, n), lo)
-  }
-}
-
-const growU32 = (arr: Uint32Array, need: number): Uint32Array => {
-  if (need <= arr.length) return arr
-  let n = arr.length || 1024
-  while (n < need) n *= 2
-  const next = new Uint32Array(n)
-  next.set(arr)
-  return next
-}
