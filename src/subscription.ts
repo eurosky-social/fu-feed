@@ -116,12 +116,16 @@ export const startRetentionSweep = (
     intervalMs?: number
     // Reward signal is kept longer than raw likes so parameter tuning has history.
     interactionsRetentionHours?: number
+    // Durable curator selection is kept on its own, longer horizon than raw
+    // likes so a curator survives the likes cutoff. 0 = don't sweep curators.
+    curatorRetentionHours?: number
   } = {},
 ): NodeJS.Timeout => {
   const {
     pickerDid,
     intervalMs = 10 * 60 * 1000,
     interactionsRetentionHours = 30 * 24,
+    curatorRetentionHours = 30 * 24,
   } = opts
   const sweep = async () => {
     const cutoff = new Date(
@@ -129,6 +133,9 @@ export const startRetentionSweep = (
     ).toISOString()
     const interactionsCutoff = new Date(
       Date.now() - interactionsRetentionHours * 60 * 60 * 1000,
+    ).toISOString()
+    const curatorsCutoff = new Date(
+      Date.now() - curatorRetentionHours * 60 * 60 * 1000,
     ).toISOString()
     try {
       let likesToDelete = db.deleteFrom('likes').where('indexed_at', '<', cutoff)
@@ -149,10 +156,22 @@ export const startRetentionSweep = (
         .deleteFrom('interactions')
         .where('created_at', '<', interactionsCutoff)
         .executeTakeFirst()
+      // The curators table is deliberately NOT swept by the likes cutoff —
+      // that's the whole point (a curator survives the likes sweep). It gets
+      // its own, longer horizon here, so a curator that stopped being active
+      // (no longer co-liking, no longer refreshed) eventually ages out.
+      const curators =
+        curatorRetentionHours > 0
+          ? await db
+              .deleteFrom('curators')
+              .where('updated_at', '<', curatorsCutoff)
+              .executeTakeFirst()
+          : { numDeletedRows: BigInt(0) }
       console.log(
         `🧹 retention sweep removed ${Number(likes.numDeletedRows ?? 0)} likes, ` +
           `${Number(posts.numDeletedRows ?? 0)} post_meta, ` +
-          `${Number(interactions.numDeletedRows ?? 0)} interactions (cutoff ${cutoff})`,
+          `${Number(interactions.numDeletedRows ?? 0)} interactions, ` +
+          `${Number(curators.numDeletedRows ?? 0)} curators (cutoff ${cutoff})`,
       )
     } catch (err) {
       console.error('retention sweep failed', err)

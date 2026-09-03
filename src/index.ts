@@ -104,6 +104,15 @@ const run = async () => {
     },
     feeds: buildFeeds(),
     retentionHours: maybeInt(process.env.FEEDGEN_RETENTION_HOURS) ?? 72,
+    persistCurators: process.env.FEEDGEN_PERSIST_CURATORS !== 'false',
+    // 30 days: a curator survives far past the 72h likes cutoff. A still-active
+    // curator is refreshed every time it contributes, so this only bounds how
+    // long a *stale* (no longer co-liking) curator lingers before being dropped.
+    curatorRetentionHours:
+      maybeInt(process.env.FEEDGEN_CURATOR_RETENTION_HOURS) ?? 30 * 24,
+    // 14 days: a curator not seen live for a fortnight keeps half its weight.
+    curatorDecayHalfLifeHours:
+      maybeFloat(process.env.FEEDGEN_CURATOR_DECAY_HALFLIFE_HOURS) ?? 14 * 24,
     backfillTtlSeconds:
       maybeInt(process.env.FEEDGEN_BACKFILL_TTL_SECONDS) ?? 21600, // 6h
     colikerBackfill: {

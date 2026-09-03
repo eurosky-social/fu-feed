@@ -1,7 +1,7 @@
 import path from 'path'
 import { Database } from '../db'
 import { GraphConfig, RankingConfig } from '../config'
-import { ILikeGraph } from './types'
+import { ILikeGraph, ScoreOptions } from './types'
 import { ArenaInterner, isInternable } from './arena-interner'
 import { BuildWorkerInput } from './build-worker'
 import { CsrSnapshot, buildCsrSnapshot, toTsMin } from './csr-build'
@@ -207,6 +207,7 @@ export class CsrLikeGraph implements ILikeGraph {
     seedUris: string[],
     r: RankingConfig,
     candidateLimit = r.maxCandidates,
+    opts?: ScoreOptions,
   ): Map<string, number> {
     const out = new Map<string, number>()
     const n = seedUris.length
@@ -268,6 +269,26 @@ export class CsrLikeGraph implements ILikeGraph {
       if (visits > budget) break
     }
     if (viewerInt !== undefined) incoming.delete(viewerInt)
+
+    // Merge the viewer's durable curator selection (loaded from the `curators`
+    // table by the ranker, already decayed by age). A curator whose seed
+    // co-like aged out of the live graph is merged back in with its persisted
+    // weight, so they still contribute candidates from their recent likes —
+    // provided they actually have forward edges in the window (a curator with
+    // no in-window likes would contribute nothing and must not take a top-N
+    // slot). Live curators always win: a curator present both ways keeps the
+    // live weight, the freshest signal. See ScoreOptions.
+    const durable = opts?.durableCurators
+    if (durable && durable.size > 0) {
+      for (const [did, w] of durable) {
+        if (did === viewerDid) continue
+        const u = this.userI.get(did)
+        if (u === undefined) continue // not in the graph at all
+        if (incoming.has(u)) continue // live wins
+        if (!this.hasForward(u)) continue // no recent likes → no candidates
+        incoming.set(u, w)
+      }
+    }
     if (incoming.size === 0) return out
 
     const curators =
@@ -276,6 +297,15 @@ export class CsrLikeGraph implements ILikeGraph {
         : [...incoming.entries()]
             .sort((a, b) => b[1] - a[1])
             .slice(0, r.maxCurators)
+
+    // Hand the final selected curator set (live + merged durable, post-cut)
+    // back to the ranker so it can upsert the durable table: refreshing active
+    // curators resets their decay clock and keeps their row alive.
+    if (opts?.onCurators) {
+      const live = new Map<string, number>()
+      for (const [u, w] of curators) live.set(this.userI.keyAt(u), w)
+      opts.onCurators(live)
+    }
 
     // 3–4. candidates: each curator's top-N recent likes (delta newest, then
     // base from the end), deg(c) = count considered, score contributions.
@@ -388,6 +418,15 @@ export class CsrLikeGraph implements ILikeGraph {
   private revDegree(p: number): number {
     const base = p < this.basePosts ? this.revOff[p + 1] - this.revOff[p] : 0
     return base + (this.deltaRev.get(p)?.length ?? 0)
+  }
+
+  // whether a user has any forward (user → liked-post) edge in the graph: base
+  // CSR slice or delta. Used by the durable-curator merge to skip curators with
+  // no in-window likes — they'd contribute no candidates and waste a top-N slot.
+  private hasForward(u: number): boolean {
+    if (u < this.baseUsers && this.fwdOff[u + 1] - this.fwdOff[u] > 0) return true
+    const df = this.deltaFwd.get(u)
+    return !!df && df.length > 0
   }
 }
 

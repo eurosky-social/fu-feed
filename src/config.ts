@@ -49,6 +49,23 @@ export type Config = {
   feeds: FeedDef[]
   // How long like edges + post metadata are retained, in hours.
   retentionHours: number
+  // Persist each viewer's curator selection (the users who co-liked their seed
+  // posts, with the weights the graph computed) in the `curators` table, so
+  // the selection survives the likes retention sweep: the co-like edges that
+  // established a curator age out of `likes`, but the (viewer, curator)
+  // relationship stays, and an still-active curator (recent likes still in the
+  // graph window) keeps contributing candidates. See GraphRanker +
+  // ILikeGraph.score's durableCurators option.
+  persistCurators: boolean
+  // How long durable curator rows live before their own sweep, in hours — a
+  // longer horizon than `retentionHours` so a curator survives the likes
+  // cutoff. 0 = keep indefinitely (sweep disabled).
+  curatorRetentionHours: number
+  // Exponential decay half-life on a durable curator's stored weight, by time
+  // since updated_at, applied when the ranker loads the selection: a curator
+  // not seen live for a while fades, so a stale co-like from long ago matters
+  // less than a recent one. 0 = no decay.
+  curatorDecayHalfLifeHours: number
   // How long a viewer is considered "backfilled" before we re-import their
   // like history, in seconds. Doubles as the stampede lock duration.
   backfillTtlSeconds: number
