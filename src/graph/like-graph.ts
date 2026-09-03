@@ -1,7 +1,7 @@
 import { sql } from 'kysely'
 import { Database } from '../db'
 import { GraphConfig, RankingConfig } from '../config'
-import { ILikeGraph } from './types'
+import { ILikeGraph, SeedLike } from './types'
 
 const EPOCH_MS = Date.UTC(2020, 0, 1)
 const FUTURE_SKEW_MS = 5 * 60000 // clamp clock-skewed / spoofed createdAt to ~now
@@ -14,6 +14,22 @@ const toTsMin = (ms: number): number => {
   const m = Math.floor((clamped - EPOCH_MS) / 60000)
   return m > 0 ? m : 0
 }
+// Seconds since EPOCH_MS, clamped like toTsMin. Used only for the reverse-edge
+// chronology comparison in score() (lateLikerWeight): minute granularity let a
+// bot reacting within the same minute as the viewer's like count as "early".
+// Seconds still pack as SMI until ~2053, so fwd[]/rev[] stay packed arrays.
+const toTsSec = (ms: number): number => {
+  const cap = Date.now() + FUTURE_SKEW_MS
+  const clamped = ms > cap ? cap : ms
+  const s = Math.floor((clamped - EPOCH_MS) / 1000)
+  return s > 0 ? s : 0
+}
+// The viewer's like time on a seed post, in this layout's tsSec encoding, so it
+// compares against reverse-edge times that are also in seconds (see toTsSec).
+// Infinity for an unusable timestamp, which makes every liker compare as early
+// and so leaves that seed post unweighted rather than mis-weighted.
+const seedTsMin = (likedAtMs: number): number =>
+  Number.isFinite(likedAtMs) ? toTsSec(likedAtMs) : Number.POSITIVE_INFINITY
 const BUILD_PAGE = 100000
 
 // In-memory like graph: the user↔post bipartite graph held in RAM so the
@@ -25,7 +41,11 @@ const BUILD_PAGE = 100000
 //   - forward (user → likes): fwd[userInt] = [postInt, tsMin, postInt, tsMin, …]
 //     in chronological order (newest at the end) — all SMIs, so V8 keeps it as a
 //     packed 4-byte element array.
-//   - reverse (post → likers): rev[postInt] = [userInt, …]
+//   - reverse (post → likers): rev[postInt] = [userInt, tsSec, …] — the like
+//     times (in SECONDS, see toTsSec) are what let score() tell early likers
+//     from late ones; seconds, not minutes, so a same-minute reactor can't
+//     slip past lateLikerWeight. The CSR layout makes the same information
+//     the heavier of the two, so it is always carried.
 // The seed (the viewer's recent likes) is read from Postgres by GraphRanker, so
 // the graph only powers curator discovery + candidate generation.
 //
@@ -55,7 +75,7 @@ export class LikeGraph implements ILikeGraph {
     const u = internUser(this.userId, this.fwd, likerDid)
     const p = internPost(this.postId, this.postUri, this.rev, subjectUri)
     this.fwd[u].push(p, toTsMin(createdAtMs))
-    this.rev[p].push(u)
+    this.rev[p].push(u, toTsSec(createdAtMs))
     this.pending?.push([likerDid, subjectUri, createdAtMs])
   }
 
@@ -121,7 +141,7 @@ export class LikeGraph implements ILikeGraph {
           const u = internUser(userId, fwd, r.liker_did)
           const p = internPost(postId, postUri, rev, r.subject_uri)
           fwd[u].push(p, toTsMin(ms))
-          rev[p].push(u)
+          rev[p].push(u, toTsSec(ms))
           edges++
         }
 
@@ -152,7 +172,7 @@ export class LikeGraph implements ILikeGraph {
           const ui = internUser(this.userId, this.fwd, d)
           const pi = internPost(this.postId, this.postUri, this.rev, u)
           this.fwd[ui].push(pi, toTsMin(ms))
-          this.rev[pi].push(ui)
+          this.rev[pi].push(ui, toTsSec(ms))
           replayed++
         }
       }
@@ -177,19 +197,25 @@ export class LikeGraph implements ILikeGraph {
   // time-decay / popularity / freshness / diversity pass.
   score(
     viewerDid: string,
-    seedUris: string[],
+    seed: SeedLike[],
     r: RankingConfig,
     candidateLimit = r.maxCandidates,
   ): Map<string, number> {
     const out = new Map<string, number>()
-    const n = seedUris.length
+    const n = seed.length
     if (n === 0 || !this.ready) return out
     const viewerInt = this.userId.get(viewerDid)
 
     const minW = r.seedRecencyMinWeight
+    // credit for a curator who liked the seed post at or after the viewer did.
+    // Both sides of the comparison are in SECONDS (rev[] / seedTs): minute
+    // granularity let a bot reacting within the same minute as the viewer's
+    // like count as "early" and slip past lateLikerWeight.
+    const lateW = r.lateLikerWeight
+    const chronologyOn = lateW !== 1
     const seedPostInts = new Set<number>()
-    for (const uri of seedUris) {
-      const p = this.postId.get(uri)
+    for (const s of seed) {
+      const p = this.postId.get(s.uri)
       if (p !== undefined) seedPostInts.add(p)
     }
     // also exclude every post the viewer has liked in-graph (not just the
@@ -206,16 +232,24 @@ export class LikeGraph implements ILikeGraph {
     //      W_c = Σ_i seedWeight(i) / deg(i)^itemBranchingPower
     const incoming = new Map<number, number>()
     for (let idx = 0; idx < n; idx++) {
-      const p = this.postId.get(seedUris[idx])
+      const p = this.postId.get(seed[idx].uri)
       if (p === undefined) continue
-      const likers = this.rev[p]
+      const likers = this.rev[p] // [userInt, tsSec, …]
       if (!likers || likers.length === 0) continue
+      const deg = likers.length / 2
       const w = n === 1 ? 1 : minW + (1 - minW) * (idx / (n - 1))
-      const contrib = w / Math.pow(likers.length, r.itemBranchingPower)
-      const scan = Math.min(likers.length, this.cfg.seedLikerScanCap)
+      const contrib = w / Math.pow(deg, r.itemBranchingPower)
+      const lateContrib = contrib * lateW
+      // the viewer's own like time on this seed post; a liker at or after it is
+      // late. An unusable timestamp leaves everyone early rather than guessing.
+      const seedTs = chronologyOn ? seedTsMin(seed[idx].likedAtMs) : 0
+      const scan = Math.min(deg, this.cfg.seedLikerScanCap)
       for (let k = 0; k < scan; k++) {
-        const u = likers[k]
-        incoming.set(u, (incoming.get(u) ?? 0) + contrib)
+        const u = likers[2 * k]
+        const c =
+          chronologyOn && likers[2 * k + 1] >= seedTs ? lateContrib : contrib
+        if (c === 0) continue // lateLikerWeight 0 → late likers are dropped
+        incoming.set(u, (incoming.get(u) ?? 0) + c)
       }
       visits += scan
       if (visits > budget) break

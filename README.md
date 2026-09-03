@@ -11,10 +11,14 @@ A collaborative filter over the network's **likes**:
 1. **Seed** — the viewer's recent likes, each weighted (recent likes are down-weighted to reduce
    over-reactivity).
 2. **Curators** — other users who liked those same posts. A curator's weight reflects how many of the
-   viewer's seed posts they also liked.
+   viewer's seed posts they also liked, and whether they got there first: someone who liked a seed post
+   *before* the viewer found it independently, while someone who liked it after may just have ridden the
+   same wave, so late likers keep only `FEEDGEN_LATE_LIKER_WEIGHT` of their credit.
 3. **Candidates** — those curators' other recent likes. A post's score is a smoothed count of the
    independent paths reaching it (`paths^smoothing`), normalized by the curators' and seed items'
-   degrees.
+   degrees and shaded down by how many likers the candidate already has in the window
+   (`FEEDGEN_CANDIDATE_DEGREE_PENALTY`), which keeps broadly-popular posts from crowding niche ones out
+   of the candidate cut.
 4. **Finalize** — exponential time-decay (half-life), popularity penalty (`/ likeCount^penalty`), a
    freshness cap, adult-label and reply filtering, per-author diversification, and exclusion of posts
    the viewer has already liked or seen.

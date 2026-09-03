@@ -23,6 +23,12 @@ const like = (
   indexed_at: hoursAgo(indexedHoursAgo),
 })
 
+// The viewer's own like on a seed post, in the shape GraphRanker passes: epoch
+// ms, so the graph can tell which of that post's other likers got there first.
+const seed = (uri: string, likedHoursAgo: number) => [
+  { uri, likedAtMs: Date.now() - likedHoursAgo * 60 * 60 * 1000 },
+]
+
 const build = async (rows: LikeRow[]) => {
   const graph = new CsrLikeGraph(graphConfig())
   const { db, queries } = makeFakeDb(likeRowsHandler(rows))
@@ -73,7 +79,7 @@ describe('CsrLikeGraph.score', () => {
       like(CURATOR, candidate, 1),
     ])
 
-    const scored = graph.score(VIEWER, [SEED], rankingConfig())
+    const scored = graph.score(VIEWER, seed(SEED, 3), rankingConfig())
     assert.ok(scored.has(candidate), 'co-liked candidate should be scored')
     assert.ok((scored.get(candidate) ?? 0) > 0, 'candidate should score above zero')
     assert.ok(!scored.has(SEED), 'the seed post must not be recommended back')
@@ -88,7 +94,7 @@ describe('CsrLikeGraph.score', () => {
       like(VIEWER, own, 1),
     ])
 
-    const scored = graph.score(VIEWER, [SEED], rankingConfig())
+    const scored = graph.score(VIEWER, seed(SEED, 3), rankingConfig())
     assert.ok(!scored.has(own), 'viewer must not be their own curator')
   })
 
@@ -100,7 +106,7 @@ describe('CsrLikeGraph.score', () => {
       like(CURATOR, stale, 200), // well outside candidateLikeWindowHours (48)
     ])
 
-    const scored = graph.score(VIEWER, [SEED], rankingConfig())
+    const scored = graph.score(VIEWER, seed(SEED, 3), rankingConfig())
     assert.ok(!scored.has(stale), 'like outside the candidate window must not qualify')
   })
 
@@ -126,7 +132,7 @@ describe('CsrLikeGraph.score', () => {
       like(CURATOR, backfilled, 500, 0.1),
     ])
 
-    const scored = graph.score(VIEWER, [SEED], rankingConfig())
+    const scored = graph.score(VIEWER, seed(SEED, 4), rankingConfig())
     assert.ok(
       scored.has(fresh),
       'a backfilled like at the slice end must not truncate the traversal',
@@ -147,7 +153,7 @@ describe('CsrLikeGraph.score', () => {
     }
 
     const { graph } = await build(rows)
-    const scored = graph.score(VIEWER, [SEED], rankingConfig())
+    const scored = graph.score(VIEWER, seed(SEED, 100), rankingConfig())
 
     for (const uri of expected) {
       assert.ok(scored.has(uri), `in-window candidate ${uri} should survive`)
@@ -163,7 +169,7 @@ describe('CsrLikeGraph.score', () => {
     ])
 
     // one curator liked it, so a threshold of 2 must exclude it
-    const scored = graph.score(VIEWER, [SEED], rankingConfig({ minEligibleRaters: 2 }))
+    const scored = graph.score(VIEWER, seed(SEED, 3), rankingConfig({ minEligibleRaters: 2 }))
     assert.ok(!scored.has(single), 'single-rater candidate should be cut at threshold 2')
   })
 
@@ -174,13 +180,82 @@ describe('CsrLikeGraph.score', () => {
     }
     const { graph } = await build(rows)
 
-    const scored = graph.score(VIEWER, [SEED], rankingConfig(), 5)
+    const scored = graph.score(VIEWER, seed(SEED, 5), rankingConfig(), 5)
     assert.equal(scored.size, 5, 'candidateLimit should bound the result')
   })
 
+  // Chronology: someone who liked the seed post BEFORE the viewer found it
+  // independently; someone who liked it after may just have ridden the same
+  // wave. lateLikerWeight decides how much the latter still counts.
+  describe('lateLikerWeight', () => {
+    const EARLY = 'did:plc:early'
+    const LATE = 'did:plc:late'
+    const earlyPick = 'at://did:plc:a/app.bsky.feed.post/early-pick'
+    const latePick = 'at://did:plc:a/app.bsky.feed.post/late-pick'
+
+    // Symmetric by construction: both curators liked the seed and one further
+    // post each, so the only thing separating them is *when* they liked SEED.
+    const fixture = () =>
+      build([
+        like(EARLY, SEED, 6), // before the viewer
+        like(VIEWER, SEED, 5),
+        like(LATE, SEED, 4), // after the viewer
+        like(EARLY, earlyPick, 1),
+        like(LATE, latePick, 1),
+      ])
+
+    it('ranks the early liker\'s pick above the late liker\'s', async () => {
+      const { graph } = await fixture()
+      const scored = graph.score(
+        VIEWER,
+        seed(SEED, 5),
+        rankingConfig({ lateLikerWeight: 0.3 }),
+      )
+      assert.ok(
+        (scored.get(earlyPick) ?? 0) > (scored.get(latePick) ?? 0),
+        'the pick of the curator who liked the seed first should score higher',
+      )
+    })
+
+    it('drops late likers entirely at weight 0', async () => {
+      const { graph } = await fixture()
+      const scored = graph.score(
+        VIEWER,
+        seed(SEED, 5),
+        rankingConfig({ lateLikerWeight: 0 }),
+      )
+      assert.ok(scored.has(earlyPick), 'the early liker still curates')
+      assert.ok(!scored.has(latePick), 'a late liker contributes nothing at weight 0')
+    })
+
+    it('ignores chronology at weight 1', async () => {
+      const { graph } = await fixture()
+      const scored = graph.score(VIEWER, seed(SEED, 5), rankingConfig({ lateLikerWeight: 1 }))
+      assert.equal(
+        scored.get(earlyPick),
+        scored.get(latePick),
+        'weight 1 must leave both curators weighted identically',
+      )
+    })
+
+    it('counts every liker as early when the seed like time is unusable', async () => {
+      const { graph } = await fixture()
+      const scored = graph.score(
+        VIEWER,
+        [{ uri: SEED, likedAtMs: NaN }],
+        rankingConfig({ lateLikerWeight: 0 }),
+      )
+      // A missing timestamp must not silently delete half the curator set.
+      assert.ok(scored.has(earlyPick))
+      assert.ok(scored.has(latePick))
+    })
+  })
+
+  // In-graph popularity: two candidates with identical path structure, one of
+  // which everybody has already liked.
   it('returns nothing for an unknown viewer', async () => {
     const { graph } = await build([like(CURATOR, SEED, 1)])
-    const scored = graph.score('did:plc:stranger', [SEED], rankingConfig())
+    const scored = graph.score('did:plc:stranger', seed(SEED, 1), rankingConfig())
     assert.equal(scored.size, 0)
   })
 })
