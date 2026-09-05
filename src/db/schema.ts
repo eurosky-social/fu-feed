@@ -3,6 +3,7 @@ export type DatabaseSchema = {
   post_meta: PostMeta
   seen: Seen
   interactions: Interaction
+  curators: Curator
   sub_state: SubState
 }
 
@@ -68,6 +69,26 @@ export type Interaction = {
   weight: number
   // when we received it (ISO 8601)
   created_at: string
+}
+
+// A persisted curator selection: for a given viewer (feed user), another user
+// who has co-liked the viewer's seed posts, with the incoming weight the graph
+// last computed for them. Durable across the likes retention sweep — the
+// `likes` rows that established the co-like age out, but the curator
+// relationship stays so an still-active curator keeps contributing candidates
+// (see GraphRanker + ILikeGraph.score's durableCurators option). Has its own,
+// longer retention horizon (curatorRetentionHours) and decays by updated_at.
+export type Curator = {
+  // the viewer whose feed this curator selection personalizes
+  viewer_did: string
+  // a user who co-liked the viewer's seed posts
+  curator_did: string
+  // incoming weight W_c the graph last assigned this curator (already
+  // decayed to the moment it was stored; see GraphRanker)
+  weight: number
+  // when this row was last refreshed (ISO 8601); drives decay + the
+  // curator-only retention sweep
+  updated_at: string
 }
 
 export type SubState = {

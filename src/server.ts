@@ -172,6 +172,7 @@ export class FeedGenerator {
     }
     this.retentionTimer = startRetentionSweep(this.db, this.cfg.retentionHours, {
       pickerDid: this.cfg.pickerDid,
+      curatorRetentionHours: this.cfg.curatorRetentionHours,
     })
     // Warm the shared cold-start popularity cache so the first cold-start load
     // after boot doesn't pay the heavy GROUP-BY (fire-and-forget; it self-heals

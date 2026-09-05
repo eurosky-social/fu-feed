@@ -1,7 +1,7 @@
 import { sql } from 'kysely'
 import { Database } from '../db'
 import { GraphConfig, RankingConfig } from '../config'
-import { ILikeGraph } from './types'
+import { ILikeGraph, ScoreOptions } from './types'
 
 const EPOCH_MS = Date.UTC(2020, 0, 1)
 const FUTURE_SKEW_MS = 5 * 60000 // clamp clock-skewed / spoofed createdAt to ~now
@@ -36,6 +36,7 @@ export class LikeGraph implements ILikeGraph {
   private building = false
 
   private userId = new Map<string, number>()
+  private userDid: string[] = [] // reverse of userId (int → DID), for onCurators
   private postId = new Map<string, number>()
   private postUri: string[] = []
   private fwd: number[][] = []
@@ -52,7 +53,7 @@ export class LikeGraph implements ILikeGraph {
 
   applyCreate(likerDid: string, subjectUri: string, createdAtMs: number): void {
     if (!this.ready) return // pre-build likes are loaded from Postgres instead
-    const u = internUser(this.userId, this.fwd, likerDid)
+    const u = internUser(this.userId, this.fwd, this.userDid, likerDid)
     const p = internPost(this.postId, this.postUri, this.rev, subjectUri)
     this.fwd[u].push(p, toTsMin(createdAtMs))
     this.rev[p].push(u)
@@ -75,6 +76,7 @@ export class LikeGraph implements ILikeGraph {
     const startedAt = Date.now()
     try {
       const userId = new Map<string, number>()
+      const userDid: string[] = []
       const postId = new Map<string, number>()
       const postUri: string[] = []
       const fwd: number[][] = []
@@ -118,7 +120,7 @@ export class LikeGraph implements ILikeGraph {
         for (const r of rows) {
           const ms = Date.parse(r.created_at)
           if (isNaN(ms)) continue
-          const u = internUser(userId, fwd, r.liker_did)
+          const u = internUser(userId, fwd, userDid, r.liker_did)
           const p = internPost(postId, postUri, rev, r.subject_uri)
           fwd[u].push(p, toTsMin(ms))
           rev[p].push(u)
@@ -137,6 +139,7 @@ export class LikeGraph implements ILikeGraph {
 
       // atomic swap (single-threaded → no torn reads)
       this.userId = userId
+      this.userDid = userDid
       this.postId = postId
       this.postUri = postUri
       this.fwd = fwd
@@ -149,7 +152,7 @@ export class LikeGraph implements ILikeGraph {
       let replayed = 0
       if (this.pending) {
         for (const [d, u, ms] of this.pending) {
-          const ui = internUser(this.userId, this.fwd, d)
+          const ui = internUser(this.userId, this.fwd, this.userDid, d)
           const pi = internPost(this.postId, this.postUri, this.rev, u)
           this.fwd[ui].push(pi, toTsMin(ms))
           this.rev[pi].push(ui)
@@ -180,6 +183,7 @@ export class LikeGraph implements ILikeGraph {
     seedUris: string[],
     r: RankingConfig,
     candidateLimit = r.maxCandidates,
+    opts?: ScoreOptions,
   ): Map<string, number> {
     const out = new Map<string, number>()
     const n = seedUris.length
@@ -222,6 +226,27 @@ export class LikeGraph implements ILikeGraph {
     }
     // exclude the viewer from the curator set (they liked every seed post)
     if (viewerInt !== undefined) incoming.delete(viewerInt)
+
+    // Merge the viewer's durable curator selection (loaded from the `curators`
+    // table by the ranker, already decayed by age). A curator whose seed
+    // co-like aged out of the live graph is merged back in with its persisted
+    // weight, so they still contribute candidates from their recent likes —
+    // provided they actually have forward edges in the window (a curator with
+    // no in-window likes would contribute nothing and must not take a top-N
+    // slot). Live curators always win: a curator present both ways keeps the
+    // live weight, the freshest signal. See ScoreOptions.
+    const durable = opts?.durableCurators
+    if (durable && durable.size > 0) {
+      for (const [did, w] of durable) {
+        if (did === viewerDid) continue
+        const u = this.userId.get(did)
+        if (u === undefined) continue // not in the graph at all
+        if (incoming.has(u)) continue // live wins
+        const arr = this.fwd[u]
+        if (!arr || arr.length === 0) continue // no recent likes → no candidates
+        incoming.set(u, w)
+      }
+    }
     if (incoming.size === 0) return out
 
     // top maxCurators by incoming weight
@@ -231,6 +256,15 @@ export class LikeGraph implements ILikeGraph {
         : [...incoming.entries()]
             .sort((a, b) => b[1] - a[1])
             .slice(0, r.maxCurators)
+
+    // Hand the final selected curator set (live + merged durable, post-cut)
+    // back to the ranker so it can upsert the durable table: refreshing active
+    // curators resets their decay clock and keeps their row alive.
+    if (opts?.onCurators) {
+      const live = new Map<string, number>()
+      for (const [u, w] of curators) live.set(this.userDid[u], w)
+      opts.onCurators(live)
+    }
 
     // 3–4. candidates: each curator's top-N recent likes within the window.
     //      deg(c) = count of those (incl. seed posts, matching the SQL).
@@ -320,12 +354,14 @@ export class LikeGraph implements ILikeGraph {
 const internUser = (
   map: Map<string, number>,
   fwd: number[][],
+  uris: string[],
   did: string,
 ): number => {
   let id = map.get(did)
   if (id === undefined) {
     id = map.size
     map.set(did, id)
+    uris.push(did)
     fwd[id] = []
   }
   return id

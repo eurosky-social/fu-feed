@@ -178,6 +178,81 @@ describe('CsrLikeGraph.score', () => {
     assert.equal(scored.size, 5, 'candidateLimit should bound the result')
   })
 
+  describe('durable curators', () => {
+    const candidate = 'at://did:plc:a/app.bsky.feed.post/cand'
+
+    // CURATOR is still active (recent candidate like) but did NOT like the
+    // seed post in the live graph — the co-like aged out. Without the durable
+    // selection, CURATOR is never discovered and the candidate is absent.
+    const fixture = () =>
+      build([
+        like(VIEWER, SEED, 5),
+        like(CURATOR, candidate, 1),
+      ])
+
+    it('merges a durable curator the live pass missed', async () => {
+      const { graph } = await fixture()
+      // sanity: without the durable selection the candidate is not scored
+      const liveOnly = graph.score(VIEWER, [SEED], rankingConfig())
+      assert.ok(!liveOnly.has(candidate), 'no live curator → no candidate')
+
+      const scored = graph.score(VIEWER, [SEED], rankingConfig(), undefined, {
+        durableCurators: new Map([[CURATOR, 1]]),
+      })
+      assert.ok(scored.has(candidate), 'the durable curator should surface its candidate')
+    })
+
+    it('reports the selected curators via onCurators', async () => {
+      const { graph } = await build([
+        like(VIEWER, SEED, 5),
+        like(CURATOR, SEED, 6),
+        like(CURATOR, candidate, 1),
+      ])
+      const seen = new Map<string, number>()
+      graph.score(VIEWER, [SEED], rankingConfig(), undefined, {
+        onCurators: (m) => {
+          for (const [k, v] of m) seen.set(k, v)
+        },
+      })
+      assert.ok(seen.has(CURATOR), 'the live curator should be reported')
+      assert.ok((seen.get(CURATOR) ?? 0) > 0, 'with a positive weight')
+    })
+
+    it('lets a live curator win over a durable one (no double count)', async () => {
+      const { graph } = await build([
+        like(VIEWER, SEED, 5),
+        like(CURATOR, SEED, 6),
+        like(CURATOR, candidate, 1),
+      ])
+      const without = graph.score(VIEWER, [SEED], rankingConfig())
+      const withDurable = graph.score(VIEWER, [SEED], rankingConfig(), undefined, {
+        // CURATOR is live too; the durable entry must not double its weight
+        durableCurators: new Map([[CURATOR, 999]]),
+      })
+      assert.equal(
+        withDurable.get(candidate),
+        without.get(candidate),
+        'a curator present live must keep its live weight, not the durable one',
+      )
+    })
+
+    it('skips a durable curator who is not in the graph at all', async () => {
+      const { graph } = await fixture()
+      const scored = graph.score(VIEWER, [SEED], rankingConfig(), undefined, {
+        durableCurators: new Map([['did:plc:ghost', 1]]),
+      })
+      assert.ok(!scored.has(candidate), 'a curator with no in-window likes contributes nothing')
+    })
+
+    it('never makes the viewer their own curator', async () => {
+      const { graph } = await fixture()
+      const scored = graph.score(VIEWER, [SEED], rankingConfig(), undefined, {
+        durableCurators: new Map([[VIEWER, 1]]),
+      })
+      assert.ok(!scored.has(SEED), 'the viewer must not curate their own seed post back')
+    })
+  })
+
   it('returns nothing for an unknown viewer', async () => {
     const { graph } = await build([like(CURATOR, SEED, 1)])
     const scored = graph.score('did:plc:stranger', [SEED], rankingConfig())

@@ -162,3 +162,32 @@ migrations['005'] = {
     await db.schema.alterTable('post_meta').dropColumn('langs').execute()
   },
 }
+
+migrations['006'] = {
+  async up(db: Kysely<unknown>) {
+    // Durable per-viewer curator selection (see schema Curator). Survives the
+    // likes retention sweep — the co-like edges that established a curator age
+    // out of `likes`, but the (viewer, curator) relationship stays here so an
+    // still-active curator keeps contributing candidates. Pruned on its own,
+    // longer horizon (curatorRetentionHours) by updated_at.
+    await db.schema
+      .createTable('curators')
+      .addColumn('viewer_did', 'varchar', (col) => col.notNull())
+      .addColumn('curator_did', 'varchar', (col) => col.notNull())
+      .addColumn('weight', 'real', (col) => col.notNull())
+      .addColumn('updated_at', 'varchar', (col) => col.notNull())
+      .addPrimaryKeyConstraint('curators_pk', ['viewer_did', 'curator_did'])
+      .execute()
+
+    // per-viewer load (the ranker reads a viewer's whole curator set per feed
+    // request) + the curator-only retention sweep by updated_at.
+    await db.schema
+      .createIndex('curators_viewer_idx')
+      .on('curators')
+      .columns(['viewer_did', 'updated_at'])
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('curators').execute()
+  },
+}
