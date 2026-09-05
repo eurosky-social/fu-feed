@@ -30,8 +30,11 @@ export class LikesIngester extends JetstreamSubscriptionBase {
     private readonly graph?: ILikeGraph,
     private readonly flushIntervalMs = 500,
     private readonly flushSize = 500,
+    // Hours of history to replay from Jetstream on a fresh DB (no saved cursor).
+    // See JetstreamSubscriptionBase.
+    backfillHours = 0,
   ) {
-    super(db, 'jetstream', endpoint, [LIKE_COLLECTION], reconnectDelay)
+    super(db, 'jetstream', endpoint, [LIKE_COLLECTION], reconnectDelay, backfillHours)
     this.flushTimer = setInterval(() => {
       this.flush().catch((err) => console.error('like flush failed', err))
     }, this.flushIntervalMs)
