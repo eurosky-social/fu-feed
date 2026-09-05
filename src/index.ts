@@ -87,6 +87,7 @@ const run = async () => {
     pickerDid: maybeStr(process.env.FEEDGEN_PICKER_DID),
     subscriptionReconnectDelay:
       maybeInt(process.env.FEEDGEN_SUBSCRIPTION_RECONNECT_DELAY) ?? 3000,
+    backfillHours: maybeInt(process.env.FEEDGEN_BACKFILL_HOURS) ?? 0,
     rankerEngine:
       maybeStr(process.env.FEEDGEN_RANKER) === 'postgres' ? 'postgres' : 'graph',
     graph: {

@@ -66,8 +66,20 @@ accumulate:
   you later widen retention).
 
 Both are lazy and self-limiting — they run only for viewers who load the feed, and converge as the graph
-fills. For a complete cold-start graph independent of who subscribes, do a one-time network-wide repo
-backfill instead (`com.atproto.sync.listRepos` → per-repo like records).
+fills.
+
+For a complete cold-start graph independent of who subscribes, set `FEEDGEN_BACKFILL_HOURS` on a fresh
+database. Jetstream's cursor is a unix-microsecond timestamp, so the subscription starts at
+`now - N hours` and replays that much of the network's like history before cutting over to the live tail
+— no separate import step. It applies only when no cursor has been saved yet, so restarts resume where
+they left off rather than replaying again; it is capped at `FEEDGEN_RETENTION_HOURS` (older history would
+be dropped by the first retention sweep anyway); and it is bounded by Jetstream's own lookback, ~7 days
+on the public v1 hosts.
+
+Mind the volume: this replays **every** like on the network, not only your viewers'. Expect on the order
+of 300k rows per hour of history — a few hundred MB of Postgres per hour — so size the disk before
+turning it up. For history beyond Jetstream's lookback, do a one-time network-wide repo backfill instead
+(`com.atproto.sync.listRepos` → per-repo like records).
 
 ### Ranker engines (`FEEDGEN_RANKER`)
 

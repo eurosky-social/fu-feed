@@ -40,6 +40,11 @@ export type Config = {
   // Public AppView used for lazy post-metadata hydration.
   publicAppviewUrl: string
   subscriptionReconnectDelay: number
+  // On a fresh database (no saved Jetstream cursor), replay this many hours of
+  // like history from Jetstream before cutting over to the live tail. 0 = go
+  // straight to live (the original behavior). Capped at retentionHours at
+  // startup, since anything older is swept on the first retention pass anyway.
+  backfillHours: number
   // Which ranker computes personalized results: the in-memory graph engine
   // (fast) or the per-request Postgres CTE (simpler, slower).
   rankerEngine: 'graph' | 'postgres'

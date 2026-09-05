@@ -63,6 +63,10 @@ export class FeedGenerator {
       cfg.jetstreamEndpoint,
       cfg.subscriptionReconnectDelay,
       graph,
+      undefined, // flushIntervalMs (default)
+      undefined, // flushSize (default)
+      // Cap backfill at retention so we don't pull history the sweep will drop.
+      Math.min(cfg.backfillHours, cfg.retentionHours),
     )
 
     const didCache = new MemoryCache()

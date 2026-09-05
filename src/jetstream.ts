@@ -32,6 +32,11 @@ export abstract class JetstreamSubscriptionBase {
     public endpoint: string, // wss://jetstream2.us-west.bsky.network/subscribe
     public wantedCollections: string[],
     public reconnectDelay: number,
+    // Hours of like history to replay on a fresh DB (no saved cursor). 0 = live.
+    // The v1 cursor is a unix-microsecond timestamp, so we seed sub_state to
+    // (now - backfillHours) in µs and Jetstream replays from there. Capped by
+    // the caller at retentionHours so we don't pull data the sweep will drop.
+    public backfillHours = 0,
   ) {}
 
   abstract handleEvent(evt: JetstreamEvent): Promise<void>
@@ -115,7 +120,16 @@ export abstract class JetstreamSubscriptionBase {
       .selectAll()
       .where('service', '=', this.service)
       .executeTakeFirst()
-    // pg returns bigint as a string; normalize to a number.
-    return res ? Number(res.cursor) : undefined
+    if (res) return Number(res.cursor)
+    // Fresh database: no cursor saved yet. Seed one backfillHours into the
+    // past (unix microseconds) so Jetstream replays that much history before
+    // cutting over to live. 0 = no backfill → undefined → live tail.
+    if (this.backfillHours <= 0) return undefined
+    const cursor = (Date.now() - this.backfillHours * 60 * 60 * 1000) * 1000
+    await this.saveCursor(cursor)
+    console.log(
+      `⏪ backfilling ~${this.backfillHours}h of like history from jetstream`,
+    )
+    return cursor
   }
 }
