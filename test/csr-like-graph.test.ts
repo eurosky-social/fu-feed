@@ -178,6 +178,52 @@ describe('CsrLikeGraph.score', () => {
     assert.equal(scored.size, 5, 'candidateLimit should bound the result')
   })
 
+  // Two curators co-liking a post is weak evidence when the post is already
+  // viral — they may both simply have seen it. The penalty shades such
+  // candidates down so niche posts survive the top-N cut.
+  describe('candidateDegreePenalty', () => {
+    const niche = 'at://did:plc:a/app.bsky.feed.post/niche'
+    const popular = 'at://did:plc:a/app.bsky.feed.post/popular'
+
+    const fixture = async () => {
+      const rows: LikeRow[] = [
+        like(VIEWER, SEED, 5),
+        like(CURATOR, SEED, 6),
+        like(CURATOR, niche, 1),
+        like(CURATOR, popular, 1),
+      ]
+      // bystanders who liked only `popular`: they never touched the seed, so
+      // they are not curators and add no path — only in-graph like count.
+      for (let i = 0; i < 20; i++) {
+        rows.push(like(`did:plc:bystander${i}`, popular, 1))
+      }
+      return build(rows)
+    }
+
+    it('shades down the candidate the whole window already liked', async () => {
+      const { graph } = await fixture()
+      const scored = graph.score(
+        VIEWER,
+        [SEED],
+        rankingConfig({ candidateDegreePenalty: 1 }),
+      )
+      assert.ok(
+        (scored.get(niche) ?? 0) > (scored.get(popular) ?? 0),
+        'the less-liked candidate should outrank the popular one',
+      )
+    })
+
+    it('leaves them tied when off', async () => {
+      const { graph } = await fixture()
+      const scored = graph.score(
+        VIEWER,
+        [SEED],
+        rankingConfig({ candidateDegreePenalty: 0 }),
+      )
+      assert.equal(scored.get(niche), scored.get(popular))
+    })
+  })
+
   it('returns nothing for an unknown viewer', async () => {
     const { graph } = await build([like(CURATOR, SEED, 1)])
     const scored = graph.score('did:plc:stranger', [SEED], rankingConfig())

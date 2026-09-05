@@ -364,6 +364,9 @@ export class CsrLikeGraph implements ILikeGraph {
     const recencyOn = r.candidateRecencyHalfLifeHours > 0
     const nowMin = toTsMin(Date.now())
     const halfLifeMin = r.candidateRecencyHalfLifeHours * 60
+    // …and shaded down by how many likers the candidate already has in the
+    // window, so broadly-liked posts don't crowd niche ones out of the top-N.
+    const degPenalty = r.candidateDegreePenalty
     const scored: { post: number; raw: number }[] = []
     for (const [post, acc] of scoreAcc) {
       if ((raters.get(post) ?? 0) < r.minEligibleRaters) continue
@@ -371,6 +374,9 @@ export class CsrLikeGraph implements ILikeGraph {
       if (recencyOn) {
         const ageMin = Math.max(0, nowMin - (lastTs.get(post) ?? nowMin))
         raw *= Math.pow(0.5, ageMin / halfLifeMin)
+      }
+      if (degPenalty > 0) {
+        raw /= Math.pow(Math.log2(this.revDegree(post) + 2), degPenalty)
       }
       scored.push({ post, raw })
     }
