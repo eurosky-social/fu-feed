@@ -150,6 +150,31 @@ export const hydratePostMeta = async (
   return out
 }
 
+// The public AppView serves records that no longer validate against the lexicon
+// bundled in this fork — which predates, for instance, the relaxation of the
+// 1000-grapheme cap on image alt text. @atproto/xrpc rejects the WHOLE response
+// on the first offending field, so a single non-conforming post cost all 25 in
+// its chunk and silently thinned the candidate set.
+//
+// The payload is already parsed and hanging off the error. Hydration reads a
+// handful of fields per post — author, createdAt, likeCount, labels, embed kind,
+// langs, reply — and the field that failed validation is never one of them, so
+// taking the body back is strictly better than discarding the chunk. Anything
+// actually malformed still falls out in toCandidateMeta below.
+// Matched by shape rather than `instanceof XRPCInvalidResponseError`: @atproto/api
+// resolves its own nested copy of @atproto/xrpc, so an error thrown in there is
+// not an instance of the class this package would import and the check would
+// quietly never fire. It would also mean depending on @atproto/xrpc directly,
+// which this package does not. The nsid guard keeps it to the one call we
+// actually understand the payload of.
+const salvagePosts = (err: unknown): any[] | null => {
+  if (typeof err !== 'object' || err === null) return null
+  const e = err as { lexiconNsid?: unknown; responseBody?: unknown }
+  if (e.lexiconNsid !== 'app.bsky.feed.getPosts') return null
+  const posts = (e.responseBody as { posts?: unknown } | undefined)?.posts
+  return Array.isArray(posts) ? posts : null
+}
+
 const fetchFromAppview = async (
   ctx: AppContext,
   uris: string[],
@@ -178,6 +203,7 @@ const fetchFromAppview = async (
   const responses: any[][] = []
   let next = 0
   let timedOut = 0
+  let invalid = 0
   const worker = async (): Promise<void> => {
     while (true) {
       if (Date.now() > deadline) return
@@ -196,8 +222,17 @@ const fetchFromAppview = async (
         )
         responses.push(res.data.posts)
       } catch (err) {
-        if (controller.signal.aborted) timedOut++
-        else console.error('getPosts hydration failed', err)
+        if (controller.signal.aborted) {
+          timedOut++
+        } else {
+          const salvaged = salvagePosts(err)
+          if (salvaged) {
+            responses.push(salvaged)
+            invalid++
+          } else {
+            console.error('getPosts hydration failed', err)
+          }
+        }
       } finally {
         clearTimeout(timer)
       }
@@ -208,10 +243,11 @@ const fetchFromAppview = async (
       worker(),
     ),
   )
-  if (next < postChunks.length || timedOut > 0) {
+  if (next < postChunks.length || timedOut > 0 || invalid > 0) {
     console.warn(
       `[foryou] hydration incomplete — ${responses.length}/${postChunks.length} chunks fetched` +
         (timedOut > 0 ? `, ${timedOut} timed out` : '') +
+        (invalid > 0 ? `, ${invalid} salvaged from lexicon validation` : '') +
         (next < postChunks.length ? ' (deadline)' : ''),
     )
   }
