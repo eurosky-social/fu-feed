@@ -79,6 +79,28 @@ The in-memory graph has two interchangeable layouts (`FEEDGEN_GRAPH_LAYOUT`): `c
 compressed-sparse-row + arena interners; compact, supports large retention windows) and `arrays`
 (Map-based; simpler). `FEEDGEN_GRAPH_WINDOW_HOURS` controls how much history is held in RAM.
 
+## Cold starts and the request budget
+
+The AppView aborts a `getFeedSkeleton` call after **10 seconds** and renders the timeout as *"Hmm, the
+feed server appears to be offline. Please let the feed owner know about this issue."* — a
+the-feed-is-broken message, shown to a viewer whose feed is merely cold. A first load can genuinely
+approach that ceiling: the inline import of the viewer's likes or follows is bounded separately from
+hydration, and if the ranker comes up empty the cold-start feed hydrates all over again. Each stage
+honours its own deadline; nothing capped the sum.
+
+`FEEDGEN_REQUEST_BUDGET_MS` (default 7s) caps it. On a cache miss the computation is started
+**detached** and awaited only for the budget. If it lands in time it is served normally. If it does
+not, the computation *keeps running and caches its result*, and the request returns an XRPC error
+carrying `Your feed is still being prepared. Pull to refresh in a few seconds.` — which is true,
+because the next pull hits the warm cache.
+
+That error is deliberately **429**. The client picks its headline from what it gets back: a timeout
+reads as "appears to be offline", and any status it does not recognise reads as "some kind of issue
+occurred — please let the feed owner know", both of which blame a cold feed and put a *View profile*
+button under it. 429 is the one branch that renders as "temporarily unavailable, please try again
+later", with no blame and no button. The AppView passes any non-500 status through unchanged, so both
+the status and our message survive the hop, and the message prints beneath the headline.
+
 ## Interactions
 
 Clients report interaction events via `app.bsky.feed.sendInteractions`
