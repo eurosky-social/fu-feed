@@ -142,8 +142,11 @@ const run = async () => {
       // A repost is the scarcer, more deliberate signal, so it outweighs a like.
       // 0 switches repost ingestion off entirely.
       repostWeight: maybeFloat(process.env.FEEDGEN_FOLLOWS_REPOST_WEIGHT) ?? 2,
+      // On by default now that the skeleton carries a repost reason, so an
+      // amplified post reaches clients as "Reposted by …" rather than as a
+      // stranger appearing from nowhere.
       includeReposts:
-        process.env.FEEDGEN_FOLLOWS_INCLUDE_REPOSTS === 'true',
+        process.env.FEEDGEN_FOLLOWS_INCLUDE_REPOSTS !== 'false',
       maxRepostsPerReposter:
         maybeInt(process.env.FEEDGEN_FOLLOWS_MAX_REPOSTS_PER_REPOSTER) ?? 200,
     },

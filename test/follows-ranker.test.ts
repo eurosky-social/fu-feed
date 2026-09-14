@@ -10,6 +10,7 @@ import {
   makeContext,
   makeFakeDb,
 } from './helpers/fake-db'
+import { encodeEntry } from '../src/algos/feed-entry'
 
 const VIEWER = 'did:plc:viewer'
 const ALICE = 'did:plc:alice'
@@ -188,24 +189,67 @@ describe('FollowsRanker — reposts', () => {
   const STRANGER = 'did:plc:stranger'
   const amplified = post(STRANGER, 'amplified')
 
-  it("surfaces a stranger's post amplified by a follow when the feed opts in", async () => {
+  const repostRecord = {
+    uri: `at://${ALICE}/app.bsky.feed.repost/abc`,
+    reposter_did: ALICE,
+    subject_uri: amplified,
+  }
+
+  it("surfaces a stranger's post amplified by a follow, with attribution", async () => {
     const index = await seedWithRepost(amplified, ALICE)
     const { ctx } = makeContext({
       authorIndex: index,
       followedDids: [ALICE],
       follows: { includeReposts: true },
       appviewPosts: [appviewPost(amplified, { author: STRANGER })],
+      repostRecords: [repostRecord],
     })
 
-    assert.deepEqual(await ranker.rank(ctx, VIEWER, 'all'), [amplified])
+    // The entry carries the repost record, so the skeleton can tell clients who
+    // amplified it rather than presenting a stranger with no explanation.
+    assert.deepEqual(await ranker.rank(ctx, VIEWER, 'all'), [
+      encodeEntry(amplified, repostRecord.uri),
+    ])
   })
 
-  it('leaves it out by default, since the skeleton carries no repost reason', async () => {
+  it('drops an amplified post it cannot attribute', async () => {
     const index = await seedWithRepost(amplified, ALICE)
     const { ctx } = makeContext({
       authorIndex: index,
       followedDids: [ALICE],
+      follows: { includeReposts: true },
       appviewPosts: [appviewPost(amplified, { author: STRANGER })],
+      repostRecords: [], // the repost row was swept between ingest and now
+    })
+
+    assert.deepEqual(await ranker.rank(ctx, VIEWER, 'all'), [])
+  })
+
+  it("leaves a follow's own post unattributed even when another follow reposted it", async () => {
+    const own = post(ALICE, 'mine')
+    const index = await seedWithRepost(own, BOB)
+    const { ctx } = makeContext({
+      authorIndex: index,
+      followedDids: [ALICE, BOB],
+      follows: { includeReposts: true },
+      appviewPosts: [appviewPost(own, { author: ALICE })],
+      repostRecords: [
+        { uri: `at://${BOB}/app.bsky.feed.repost/x`, reposter_did: BOB, subject_uri: own },
+      ],
+    })
+
+    // ALICE wrote it, so it needs no "reposted by" line.
+    assert.deepEqual(await ranker.rank(ctx, VIEWER, 'all'), [own])
+  })
+
+  it('leaves it out entirely when the feed opts out of reposts as content', async () => {
+    const index = await seedWithRepost(amplified, ALICE)
+    const { ctx } = makeContext({
+      authorIndex: index,
+      followedDids: [ALICE],
+      follows: { includeReposts: false },
+      appviewPosts: [appviewPost(amplified, { author: STRANGER })],
+      repostRecords: [repostRecord],
     })
 
     assert.deepEqual(await ranker.rank(ctx, VIEWER, 'all'), [])

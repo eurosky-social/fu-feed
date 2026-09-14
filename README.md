@@ -133,12 +133,14 @@ The two structures answer different questions and are sized accordingly:
 |---|---|---|
 | Question | "who else liked the posts I liked" | "what did these authors post, and did it land" |
 | Needs | every liker's **identity**, 30-day window | a **count** per post, ~48h window |
-| Cost | ~500M edges, tens of GB | ~10M posts, order 1 GB |
+| Cost | ~500M edges, tens of GB | ~5.6M posts, ~0.5 GB |
 
 Dropping liker identity and shrinking the window is what makes the follows feed cheap to add here —
-one to two orders of magnitude below the graph, on the same box. Most of that gigabyte is interned
-post URIs, so the footprint scales with `FEEDGEN_FOLLOWS_WINDOW_HOURS` (the lever to pull if memory
-is tight), and a compaction transiently doubles the surviving set while it rebuilds around it.
+one to two orders of magnitude below the graph, on the same box. Measured on production at a 48h
+window: 36.2M likes fold into 5.64M posts across 756k authors, seeded in 212s. Most of that half
+gigabyte is interned post URIs, so the footprint scales with `FEEDGEN_FOLLOWS_WINDOW_HOURS` (the
+lever to pull if memory is tight), and a compaction transiently doubles the surviving set while it
+rebuilds around it.
 
 It is kept structurally separate rather than bolted onto the CSR build so that the ranker, the index
 and the `follows` table lift out as a unit if it ever needs its own process.
@@ -158,12 +160,19 @@ They are used two ways:
 
 - **As engagement** (on by default): a post's score is `likes + repostWeight × reposts`, so a repost
   — scarcer and more deliberate than a like — counts for more.
-- **As content** (`FEEDGEN_FOLLOWS_INCLUDE_REPOSTS`, off by default): a post reposted *by* someone
+- **As content** (`FEEDGEN_FOLLOWS_INCLUDE_REPOSTS`, on by default): a post reposted *by* someone
   you follow enters the feed even when its author is a stranger — the traditional home-feed
-  behaviour. It is off because the feed skeleton carries no repost `reason` yet, so such a post
-  arrives in clients with no "reposted by" attribution and reads as a stranger appearing from
-  nowhere. Plumbing the reason through means carrying it in the cached ranked list, which is the
-  prerequisite for turning this on by default.
+  behaviour. The skeleton carries a `skeletonReasonRepost`, so clients render "Reposted by …"
+  rather than showing a stranger with no explanation.
+
+  The attribution travels inside the cached ranked list, which is a flat `string[]` paged by offset
+  (see `algos/feed-entry.ts`); at-URIs cannot contain a tab, so that separates the two. Entries
+  cached before this existed are bare post URIs and still decode, so no cache invalidation is
+  needed on deploy. The repost record's URI is resolved once per finished list rather than held in
+  the index — tens of bytes per edge across millions of edges, to answer a question only the
+  handful of posts that survive ranking ever ask. An amplified post whose repost record has since
+  been swept is dropped rather than served bare: an unattributed stranger is exactly what the
+  reason exists to prevent.
 
 `reposts` rows are kept only twice the candidate window (not the 90-day like retention), since
 nothing reads them beyond the index seed.

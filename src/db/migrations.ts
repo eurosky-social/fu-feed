@@ -216,3 +216,19 @@ migrations['007'] = {
     await db.schema.dropTable('reposts').execute()
   },
 }
+
+migrations['008'] = {
+  async up(db: Kysely<unknown>) {
+    // Resolving "which repost record put this post in the feed" for the URIs of
+    // one finished ranked list is a lookup by subject, which nothing else in the
+    // schema needs. Without this index it seq-scans `reposts`.
+    await db.schema
+      .createIndex('reposts_subject_idx')
+      .on('reposts')
+      .column('subject_uri')
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropIndex('reposts_subject_idx').execute()
+  },
+}

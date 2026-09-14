@@ -168,6 +168,13 @@ export const makeContext = (opts: {
   followedDids?: string[]
   // post URIs the viewer has already liked, as the `likes` table would
   alreadyLiked?: string[]
+  // repost records, as the `reposts` table would return them — what the ranker
+  // reads to attach "reposted by" attribution to an amplified post
+  repostRecords?: {
+    uri: string
+    reposter_did: string
+    subject_uri: string
+  }[]
 }): TestContext => {
   const meta = postMetaHandler(opts.cachedMeta ?? [])
   const { db } = makeFakeDb((query) => {
@@ -177,6 +184,7 @@ export const makeContext = (opts: {
     if (query.sql.includes('from "likes"')) {
       return (opts.alreadyLiked ?? []).map((uri) => ({ subject_uri: uri }))
     }
+    if (query.sql.includes('from "reposts"')) return opts.repostRecords ?? []
     return meta(query)
   })
   const available = opts.appviewPosts ?? []
