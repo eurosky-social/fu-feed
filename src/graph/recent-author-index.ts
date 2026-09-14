@@ -17,11 +17,12 @@ import { toTsMin } from './csr-build'
 //                did it get" — needs a COUNT per post across the freshness
 //                window (~48h), and no liker identities at all.
 //
-// Dropping the identities and shrinking the window is what makes it cheap: at
-// Bluesky-scale ingest a 48h window is ~10M posts at roughly 100 bytes each —
-// order 1 GB, against the graph's tens. The interned post URIs are most of
-// that, so cost scales with FOLLOWS_WINDOW_HOURS; compaction transiently
-// doubles the surviving set while it rebuilds around it.
+// Dropping the identities and shrinking the window is what makes it cheap.
+// Measured on production at a 48h window: 36.2M likes fold into 5.64M posts
+// across 756k authors, seeded in 212s, for roughly half a gigabyte — against
+// the graph's tens. The interned post URIs are most of that, so cost scales
+// with FOLLOWS_WINDOW_HOURS; compaction transiently doubles the surviving set
+// while it rebuilds around it.
 //
 // Keeping it separate is also what keeps the follows feed movable — ranker,
 // index and follow table lift out as a unit if this ever needs its own process
@@ -76,6 +77,16 @@ export type CandidateOptions = {
   maxRepostsPerReposter: number
   // how many top-scoring candidates to return
   limit: number
+}
+
+// What one candidate-generation pass produced.
+export type CandidateSet = {
+  // post URI -> engagement score, already in descending score order
+  scores: Map<string, number>
+  // post URI -> the followed account whose repost put it here. Only posts that
+  // reached the feed SOLELY through a repost appear: a post one of the viewer's
+  // own follows wrote needs no explanation, so it is attributed to nobody.
+  repostedBy: Map<string, string>
 }
 
 // Everything the index is. Swapped wholesale by seed/compact so readers never
@@ -556,13 +567,11 @@ export class RecentAuthorIndex {
   // Post URIs the given accounts wrote (and, when the feed opts in, reposted),
   // scored by in-window engagement, in descending score order — finalize()
   // relies on that ordering for its hydration budget.
-  candidates(
-    actorDids: string[],
-    opts: CandidateOptions,
-  ): Map<string, number> {
-    const out = new Map<string, number>()
+  candidates(actorDids: string[], opts: CandidateOptions): CandidateSet {
+    const scores = new Map<string, number>()
+    const repostedBy = new Map<string, string>()
     const s = this.store
-    if (!this.ready || actorDids.length === 0) return out
+    if (!this.ready || actorDids.length === 0) return { scores, repostedBy }
 
     const cutoff = toTsMin(Date.now() - opts.windowHours * HOUR_MS)
     // A post can be reached twice — written by one follow, reposted by another.
@@ -572,65 +581,76 @@ export class RecentAuthorIndex {
       const prev = best.get(p)
       if (prev === undefined || score > prev) best.set(p, score)
     }
+    // Posts one of these accounts actually wrote. They need no "reposted by"
+    // explanation, which is why the authored pass runs first and in full.
+    const authored = new Set<number>()
+    const attribution = new Map<number, string>()
 
     const localIds: number[] = []
     const localScores: number[] = []
 
+    // --- pass 1: posts they wrote ---
     for (const did of actorDids) {
-      // --- posts they wrote ---
       const a = s.authorI.get(did)
-      if (a !== undefined && a < s.nAuthors) {
-        localIds.length = 0
-        localScores.length = 0
-        let scanned = 0
-        let sum = 0
-        for (
-          let p = s.authorHead[a];
-          p !== UNSET && scanned < opts.maxPostsPerAuthor;
-          p = s.postPrev[p]
-        ) {
-          scanned++
-          if (s.postSeen[p] < cutoff) continue
-          const score = engagement(s, p, opts.repostWeight)
-          if (score < opts.minEngagement) continue
-          localIds.push(p)
-          localScores.push(score)
-          sum += score
-        }
-        const divisor =
-          opts.authorNormalization > 0 && localIds.length > 0
-            ? Math.pow(
-                Math.max(1, sum / localIds.length),
-                opts.authorNormalization,
-              )
-            : 1
-        for (let i = 0; i < localIds.length; i++) {
-          consider(localIds[i], localScores[i] / divisor)
-        }
-      }
-
-      // --- posts they reposted ---
-      if (!opts.includeReposts) continue
-      const r = s.reposterI.get(did)
-      if (r === undefined || r >= s.nReposters) continue
+      if (a === undefined || a >= s.nAuthors) continue
+      localIds.length = 0
+      localScores.length = 0
       let scanned = 0
+      let sum = 0
       for (
-        let e = s.reposterHead[r];
-        e !== UNSET && scanned < opts.maxRepostsPerReposter;
-        e = s.repostPrev[e]
+        let p = s.authorHead[a];
+        p !== UNSET && scanned < opts.maxPostsPerAuthor;
+        p = s.postPrev[p]
       ) {
         scanned++
-        const p = s.repostPost[e]
-        if (p === UNSET) continue // retracted by an unrepost
         if (s.postSeen[p] < cutoff) continue
         const score = engagement(s, p, opts.repostWeight)
         if (score < opts.minEngagement) continue
-        // No author normalization here: the post is not the reposter's, so
-        // their posting volume says nothing about how it should be weighted.
-        consider(p, score)
+        localIds.push(p)
+        localScores.push(score)
+        sum += score
+      }
+      const divisor =
+        opts.authorNormalization > 0 && localIds.length > 0
+          ? Math.pow(
+              Math.max(1, sum / localIds.length),
+              opts.authorNormalization,
+            )
+          : 1
+      for (let i = 0; i < localIds.length; i++) {
+        authored.add(localIds[i])
+        consider(localIds[i], localScores[i] / divisor)
       }
     }
-    if (best.size === 0) return out
+
+    // --- pass 2: posts they reposted ---
+    // Runs after pass 1 so `authored` is complete: a post written by follow A
+    // and reposted by follow B is A's post, not B's amplification. Where two
+    // follows both reposted something, the first one scanned gets the credit.
+    if (opts.includeReposts) {
+      for (const did of actorDids) {
+        const r = s.reposterI.get(did)
+        if (r === undefined || r >= s.nReposters) continue
+        let scanned = 0
+        for (
+          let e = s.reposterHead[r];
+          e !== UNSET && scanned < opts.maxRepostsPerReposter;
+          e = s.repostPrev[e]
+        ) {
+          scanned++
+          const p = s.repostPost[e]
+          if (p === UNSET) continue // retracted by an unrepost
+          if (s.postSeen[p] < cutoff) continue
+          const score = engagement(s, p, opts.repostWeight)
+          if (score < opts.minEngagement) continue
+          // No author normalization here: the post is not the reposter's, so
+          // their posting volume says nothing about how it should be weighted.
+          consider(p, score)
+          if (!authored.has(p) && !attribution.has(p)) attribution.set(p, did)
+        }
+      }
+    }
+    if (best.size === 0) return { scores, repostedBy }
 
     // Ties are common (most posts sit at one or two likes), so break them by
     // recency — otherwise the tail of the feed is ordered by interning accident.
@@ -641,9 +661,13 @@ export class RecentAuthorIndex {
     )
     const take = Math.min(ids.length, opts.limit)
     for (let k = 0; k < take; k++) {
-      out.set(s.postI.keyAt(ids[k]), best.get(ids[k]) as number)
+      const id = ids[k]
+      const uri = s.postI.keyAt(id)
+      scores.set(uri, best.get(id) as number)
+      const by = attribution.get(id)
+      if (by !== undefined) repostedBy.set(uri, by)
     }
-    return out
+    return { scores, repostedBy }
   }
 
   stats(): {

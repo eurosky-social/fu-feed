@@ -10,6 +10,7 @@ import {
   backfillSeedColikers,
 } from '../ranker/backfill'
 import { ensureFollowsSynced } from '../ranker/follows-backfill'
+import { postUriOf, toSkeletonPost } from './feed-entry'
 import {
   cacheRankedList,
   recacheRankedList,
@@ -98,7 +99,9 @@ export const handler = async (
   const slice = ranked.slice(offset, offset + params.limit)
   const nextOffset = offset + slice.length
   const cursor = nextOffset < ranked.length ? String(nextOffset) : undefined
-  return { cursor, feed: slice.map((post) => ({ post })) }
+  // A cached entry is the post URI, optionally carrying the repost record that
+  // put it there (see algos/feed-entry.ts).
+  return { cursor, feed: slice.map(toSkeletonPost) }
 }
 
 // Partition the scored list into unseen-then-seen (order preserved within each
@@ -115,7 +118,8 @@ const orderBySeen = async (
   if (seen.size === 0) return scored
   const unseen: string[] = []
   const seenList: string[] = []
-  for (const uri of scored) (seen.has(uri) ? seenList : unseen).push(uri)
+  // Entries may carry a repost reason; the seen set is keyed on post URIs.
+  for (const e of scored) (seen.has(postUriOf(e)) ? seenList : unseen).push(e)
   return unseen.concat(seenList)
 }
 

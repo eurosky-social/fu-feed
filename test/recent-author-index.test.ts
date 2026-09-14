@@ -83,6 +83,14 @@ const seedBoth = async (
   return { index, queries }
 }
 
+// candidates() returns { scores, repostedBy }; these assertions are about the
+// scores. Attribution has its own tests at the bottom of the file.
+const scoresOf = (
+  index: RecentAuthorIndex,
+  dids: string[],
+  o: CandidateOptions,
+): Map<string, number> => index.candidates(dids, o).scores
+
 const seed = async (rows: LikeRow[], cfg = followsConfig()) => {
   const index = new RecentAuthorIndex(cfg)
   const { db, queries } = makeFakeDb(likeRowsHandler(rows))
@@ -110,14 +118,14 @@ describe('RecentAuthorIndex.seedFromPostgres', () => {
     ])
 
     assert.deepEqual(
-      [...index.candidates([ALICE], opts())],
+      [...scoresOf(index, [ALICE], opts())],
       [
         [post(ALICE, 'a1'), 3],
         [post(ALICE, 'a2'), 1],
       ],
     )
     assert.deepEqual(
-      [...index.candidates([BOB], opts())].map(([uri]) => uri),
+      [...scoresOf(index, [BOB], opts())].map(([uri]) => uri),
       [post(BOB, 'b1')],
     )
   })
@@ -128,7 +136,7 @@ describe('RecentAuthorIndex.seedFromPostgres', () => {
       like('did:plc:l2', post(ALICE, 'new'), 1),
     ])
     assert.deepEqual(
-      [...index.candidates([ALICE], opts())].map(([uri]) => uri),
+      [...scoresOf(index, [ALICE], opts())].map(([uri]) => uri),
       [post(ALICE, 'new'), post(ALICE, 'old')],
     )
   })
@@ -139,7 +147,7 @@ describe('RecentAuthorIndex.seedFromPostgres', () => {
       like('did:plc:l2', post(ALICE, 'fresh'), 1),
     ])
     assert.deepEqual(
-      [...index.candidates([ALICE], opts({ windowHours: 48 }))].map(
+      [...scoresOf(index, [ALICE], opts({ windowHours: 48 }))].map(
         ([uri]) => uri,
       ),
       [post(ALICE, 'fresh')],
@@ -179,7 +187,7 @@ describe('RecentAuthorIndex.seedFromPostgres', () => {
     assert.equal(await index.seedFromPostgres(db), true)
     assert.equal(fired, true, 'the live likes should have raced the scan')
     assert.deepEqual(
-      [...index.candidates([ALICE], opts())],
+      [...scoresOf(index, [ALICE], opts())],
       [
         [post(ALICE, 'a1'), 2], // 2 scanned, +1 live, -1 unlike
         [post(ALICE, 'live'), 1],
@@ -190,7 +198,7 @@ describe('RecentAuthorIndex.seedFromPostgres', () => {
   it('serves nothing until it has been seeded', () => {
     const index = new RecentAuthorIndex(followsConfig())
     assert.equal(index.ready, false)
-    assert.equal(index.candidates([ALICE], opts()).size, 0)
+    assert.equal(scoresOf(index, [ALICE], opts()).size, 0)
   })
 })
 
@@ -201,7 +209,7 @@ describe('RecentAuthorIndex live updates', () => {
     index.applyLike(post(ALICE, 'a2'), Date.now())
 
     assert.deepEqual(
-      [...index.candidates([ALICE], opts())],
+      [...scoresOf(index, [ALICE], opts())],
       [
         [post(ALICE, 'a1'), 2],
         [post(ALICE, 'a2'), 1],
@@ -216,7 +224,7 @@ describe('RecentAuthorIndex live updates', () => {
     ])
     index.applyUnlike(post(ALICE, 'a1'))
     assert.deepEqual(
-      [...index.candidates([ALICE], opts())],
+      [...scoresOf(index, [ALICE], opts())],
       [[post(ALICE, 'a1'), 1]],
     )
   })
@@ -227,7 +235,7 @@ describe('RecentAuthorIndex live updates', () => {
     index.applyUnlike(post(ALICE, 'a1'))
     index.applyUnlike(post(BOB, 'never-seen'))
     assert.equal(index.stats().posts, 1)
-    assert.equal(index.candidates([ALICE], opts({ minEngagement: 1 })).size, 0)
+    assert.equal(scoresOf(index, [ALICE], opts({ minEngagement: 1 })).size, 0)
   })
 })
 
@@ -244,7 +252,7 @@ describe('RecentAuthorIndex.compact', () => {
 
     assert.equal(index.stats().posts, 1, 'the stale post should be reclaimed')
     assert.deepEqual(
-      [...index.candidates([ALICE], opts())],
+      [...scoresOf(index, [ALICE], opts())],
       [[post(ALICE, 'fresh'), 2]],
     )
   })
@@ -256,7 +264,7 @@ describe('RecentAuthorIndex.compact', () => {
     ])
     index.compact()
     assert.deepEqual(
-      [...index.candidates([ALICE], opts({ maxPostsPerAuthor: 1 }))].map(
+      [...scoresOf(index, [ALICE], opts({ maxPostsPerAuthor: 1 }))].map(
         ([uri]) => uri,
       ),
       [post(ALICE, 'newer')],
@@ -272,7 +280,7 @@ describe('RecentAuthorIndex.candidates', () => {
   it('caps the per-author scan, keeping their newest posts', async () => {
     const { index } = await seed(prolific)
     assert.deepEqual(
-      [...index.candidates([ALICE], opts({ maxPostsPerAuthor: 2 }))].map(
+      [...scoresOf(index, [ALICE], opts({ maxPostsPerAuthor: 2 }))].map(
         ([uri]) => uri,
       ),
       [post(ALICE, 'a1'), post(ALICE, 'a2')],
@@ -281,7 +289,7 @@ describe('RecentAuthorIndex.candidates', () => {
 
   it('caps the returned candidates at the limit', async () => {
     const { index } = await seed(prolific)
-    assert.equal(index.candidates([ALICE], opts({ limit: 3 })).size, 3)
+    assert.equal(scoresOf(index, [ALICE], opts({ limit: 3 })).size, 3)
   })
 
   it('drops posts under the corroboration floor', async () => {
@@ -291,7 +299,7 @@ describe('RecentAuthorIndex.candidates', () => {
       like('did:plc:l2', post(ALICE, 'twice'), 1),
     ])
     assert.deepEqual(
-      [...index.candidates([ALICE], opts({ minEngagement: 2 }))].map(([uri]) => uri),
+      [...scoresOf(index, [ALICE], opts({ minEngagement: 2 }))].map(([uri]) => uri),
       [post(ALICE, 'twice')],
     )
   })
@@ -313,7 +321,7 @@ describe('RecentAuthorIndex.candidates', () => {
     ]
 
     const { index } = await seed(rows)
-    const raw = [...index.candidates([ALICE, BOB], opts())].map(([uri]) => uri)
+    const raw = [...scoresOf(index, [ALICE, BOB], opts())].map(([uri]) => uri)
     assert.deepEqual(
       raw,
       [
@@ -326,7 +334,7 @@ describe('RecentAuthorIndex.candidates', () => {
     )
 
     const normalized = [
-      ...index.candidates([ALICE, BOB], opts({ authorNormalization: 1 })),
+      ...scoresOf(index, [ALICE, BOB], opts({ authorNormalization: 1 })),
     ].map(([uri]) => uri)
     assert.deepEqual(
       normalized,
@@ -342,7 +350,7 @@ describe('RecentAuthorIndex.candidates', () => {
 
   it('ignores authors it has never seen', async () => {
     const { index } = await seed([like('did:plc:l1', post(ALICE, 'a1'), 1)])
-    assert.equal(index.candidates(['did:plc:nobody'], opts()).size, 0)
+    assert.equal(scoresOf(index, ['did:plc:nobody'], opts()).size, 0)
   })
 })
 
@@ -375,7 +383,7 @@ describe('RecentAuthorIndex reposts', () => {
 
     // 1 like + 1 repost at weight 2 = 3, ahead of two plain likes.
     assert.deepEqual(
-      [...index.candidates([ALICE], opts({ repostWeight: 2 }))],
+      [...scoresOf(index, [ALICE], opts({ repostWeight: 2 }))],
       [
         [post(ALICE, 'reposted'), 3],
         [post(ALICE, 'liked-twice'), 2],
@@ -394,7 +402,7 @@ describe('RecentAuthorIndex reposts', () => {
       false,
     )
     assert.deepEqual(
-      [...index.candidates([ALICE], opts({ repostWeight: 0 }))],
+      [...scoresOf(index, [ALICE], opts({ repostWeight: 0 }))],
       [[post(ALICE, 'a1'), 1]],
     )
   })
@@ -403,13 +411,13 @@ describe('RecentAuthorIndex reposts', () => {
     const { index } = await seed([like('did:plc:l1', post(ALICE, 'a1'), 1)])
     index.applyRepost(REPOSTER, post(ALICE, 'a1'), Date.now())
     assert.deepEqual(
-      [...index.candidates([ALICE], opts())],
+      [...scoresOf(index, [ALICE], opts())],
       [[post(ALICE, 'a1'), 3]],
     )
 
     index.applyUnrepost(REPOSTER, post(ALICE, 'a1'))
     assert.deepEqual(
-      [...index.candidates([ALICE], opts())],
+      [...scoresOf(index, [ALICE], opts())],
       [[post(ALICE, 'a1'), 1]],
     )
   })
@@ -423,13 +431,13 @@ describe('RecentAuthorIndex reposts', () => {
     )
 
     assert.deepEqual(
-      [...index.candidates([REPOSTER], opts({ includeReposts: true }))].map(
+      [...scoresOf(index, [REPOSTER], opts({ includeReposts: true }))].map(
         ([uri]) => uri,
       ),
       [post(STRANGER, 'amplified')],
     )
     assert.equal(
-      index.candidates([REPOSTER], opts({ includeReposts: false })).size,
+      scoresOf(index, [REPOSTER], opts({ includeReposts: false })).size,
       0,
       'without the opt-in the reposter contributes no content',
     )
@@ -445,7 +453,7 @@ describe('RecentAuthorIndex reposts', () => {
     index.applyUnrepost(REPOSTER, post(STRANGER, 'amplified'))
 
     assert.equal(
-      index.candidates([REPOSTER], opts({ includeReposts: true })).size,
+      scoresOf(index, [REPOSTER], opts({ includeReposts: true })).size,
       0,
     )
   })
@@ -463,7 +471,7 @@ describe('RecentAuthorIndex reposts', () => {
 
     assert.equal(index.stats().reposts, 1, 'the edge should survive')
     assert.deepEqual(
-      [...index.candidates([REPOSTER], opts({ includeReposts: true }))].map(
+      [...scoresOf(index, [REPOSTER], opts({ includeReposts: true }))].map(
         ([uri]) => uri,
       ),
       [post(STRANGER, 'amplified')],
@@ -483,5 +491,55 @@ describe('RecentAuthorIndex reposts', () => {
 
     assert.equal(index.stats().reposts, 0)
     assert.equal(index.stats().posts, 0)
+  })
+})
+
+describe('RecentAuthorIndex repost attribution', () => {
+  const REPOSTER = 'did:plc:reposter'
+  const OTHER = 'did:plc:other'
+  const STRANGER = 'did:plc:stranger'
+  const cfg = followsConfig({ includeReposts: true })
+  const withReposts = opts({ includeReposts: true })
+
+  it('names the follow whose repost surfaced a stranger post', async () => {
+    const { index } = await seedBoth(
+      [like('did:plc:l1', post(STRANGER, 'amplified'), 1)],
+      [repost(REPOSTER, post(STRANGER, 'amplified'), 1)],
+      cfg,
+    )
+    const { repostedBy } = index.candidates([REPOSTER], withReposts)
+    assert.deepEqual(
+      [...repostedBy],
+      [[post(STRANGER, 'amplified'), REPOSTER]],
+    )
+  })
+
+  it("attributes nothing to a post one of the follows wrote", async () => {
+    const { index } = await seedBoth(
+      [like('did:plc:l1', post(ALICE, 'mine'), 1)],
+      [repost(REPOSTER, post(ALICE, 'mine'), 1)],
+      cfg,
+    )
+    // ALICE wrote it; that it was also reposted does not make it an
+    // amplification needing a "reposted by" line.
+    const { scores, repostedBy } = index.candidates(
+      [ALICE, REPOSTER],
+      withReposts,
+    )
+    assert.deepEqual([...scores.keys()], [post(ALICE, 'mine')])
+    assert.equal(repostedBy.size, 0)
+  })
+
+  it('credits the first follow scanned when two amplified the same post', async () => {
+    const { index } = await seedBoth(
+      [like('did:plc:l1', post(STRANGER, 'amplified'), 1)],
+      [
+        repost(REPOSTER, post(STRANGER, 'amplified'), 2),
+        repost(OTHER, post(STRANGER, 'amplified'), 1),
+      ],
+      cfg,
+    )
+    const { repostedBy } = index.candidates([OTHER, REPOSTER], withReposts)
+    assert.equal(repostedBy.get(post(STRANGER, 'amplified')), OTHER)
   })
 })

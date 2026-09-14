@@ -67,7 +67,7 @@ export const followsConfig = (
   authorNormalization: 0,
   includeReplies: false,
   repostWeight: 2,
-  includeReposts: false,
+  includeReposts: true,
   maxRepostsPerReposter: 200,
   ...overrides,
 })
