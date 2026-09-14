@@ -164,6 +164,13 @@ export const makeContext = (opts: {
   // When set, getPosts throws the way @atproto/xrpc does when the AppView's
   // response fails lexicon validation: the parsed body rides on the error.
   appviewInvalidResponse?: boolean
+  // Delay every getPosts call, to make hydration — and so the whole cache-miss
+  // computation — slow enough to exercise the request budget.
+  appviewDelayMs?: number
+  // Rows the cold-start popularity GROUP BY should return.
+  popularRows?: { subject_uri: string; likes: number }[]
+  // Stands in for ioredis. Defaults to an in-memory stub.
+  redis?: unknown
   // the viewer's follow list, as the `follows` table would return it
   followedDids?: string[]
   // post URIs the viewer has already liked, as the `likes` table would
@@ -185,6 +192,9 @@ export const makeContext = (opts: {
       return (opts.alreadyLiked ?? []).map((uri) => ({ subject_uri: uri }))
     }
     if (query.sql.includes('from "reposts"')) return opts.repostRecords ?? []
+    // The cold-start popularity query is raw SQL (`FROM likes`, unquoted), so
+    // it is matched on its GROUP BY rather than the table name.
+    if (/group by/i.test(query.sql)) return opts.popularRows ?? []
     return meta(query)
   })
   const available = opts.appviewPosts ?? []
@@ -196,6 +206,9 @@ export const makeContext = (opts: {
         feed: {
           getPosts: async ({ uris }: { uris: string[] }) => {
             appviewRequests.push(uris)
+            if (opts.appviewDelayMs) {
+              await new Promise((r) => setTimeout(r, opts.appviewDelayMs))
+            }
             const posts = available.filter((p) => uris.includes(p.uri))
             if (opts.appviewInvalidResponse) {
               throw Object.assign(new Error('Invalid Response'), {
@@ -212,7 +225,7 @@ export const makeContext = (opts: {
 
   const ctx = {
     db,
-    redis: {} as never,
+    redis: (opts.redis ?? makeFakeRedis()) as never,
     didResolver: {} as never,
     publicAgent,
     authorIndex: opts.authorIndex,
@@ -227,5 +240,34 @@ export const makeContext = (opts: {
     ctx,
     appviewRequests,
     appviewUris: () => appviewRequests.flat(),
+  }
+}
+
+// The slice of ioredis the feed handler actually touches: the ranked-list
+// cache (get/set) and the seen sorted-set (zrangebyscore). Everything else the
+// handler's dependencies reach for is guarded and degrades on rejection.
+export type FakeRedis = {
+  store: Map<string, string>
+  get: (key: string) => Promise<string | null>
+  set: (key: string, value: string, ...rest: unknown[]) => Promise<'OK'>
+  zrangebyscore: (...args: unknown[]) => Promise<string[]>
+  del: (...keys: string[]) => Promise<number>
+}
+
+export const makeFakeRedis = (): FakeRedis => {
+  const store = new Map<string, string>()
+  return {
+    store,
+    get: async (key) => store.get(key) ?? null,
+    set: async (key, value) => {
+      store.set(key, value)
+      return 'OK'
+    },
+    zrangebyscore: async () => [],
+    del: async (...keys) => {
+      let n = 0
+      for (const k of keys) if (store.delete(k)) n++
+      return n
+    },
   }
 }

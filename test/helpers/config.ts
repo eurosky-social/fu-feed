@@ -27,6 +27,7 @@ export const rankingConfig = (
   perAuthorCap: 2,
   authorMinGap: 5,
   cacheTtlSeconds: 900,
+  requestBudgetMs: 7000,
   inlineBackfillLimit: 100,
   inlineBackfillDeadlineMs: 1500,
   hydrationDeadlineMs: 4000,

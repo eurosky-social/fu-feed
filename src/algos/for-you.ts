@@ -1,3 +1,4 @@
+import { ResponseType, XRPCError } from '@atproto/xrpc-server'
 import { QueryParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
 import { AppContext, FeedDef } from '../config'
 import { CollaborativeFilterRanker } from '../ranker/collaborative'
@@ -52,41 +53,34 @@ export const handler = async (
 
   let ranked = await getRankedList(ctx.redis, cacheKey)
   if (!ranked) {
-    // Import what this feed's ranker needs about the viewer before ranking: the
-    // CF feed needs their like history (its seed), the follows feed needs their
-    // follow list. Both crawl the viewer's own PDS in two stages (once per TTL):
-    // a small inline first slice we AWAIT here so the first load can already
-    // personalize, plus a background top-up for later loads. We bound the wait by
-    // wall-clock in addition to the inline slice's own size cap, so a slow PDS can
-    // never trip the AppView's feed-fetch timeout ("feed unavailable" / "upstream
-    // unreachable"): on a timeout we serve the cold-start feed now, and the import
-    // invalidates the cache when it lands, personalizing the next load.
-    // Anonymous / no-history viewers get the cold-start popularity feed.
-    if (viewerDid) {
-      await (feed.ranker === 'follows'
-        ? raceDeadline(
-            ensureFollowsSynced(ctx, viewerDid),
-            ctx.cfg.follows.inlineDeadlineMs,
-          )
-        : raceDeadline(
-            ensureViewerBackfilled(ctx, viewerDid),
-            ctx.cfg.ranking.inlineBackfillDeadlineMs,
-          ))
-    }
-    const scored = await computeRanked(ctx, viewerDid, feed, viewerLangs)
-    // Bake the seen-aware order in now so every page is a plain offset slice.
-    ranked = await orderBySeen(ctx, viewerDid, scored)
-    await cacheRankedList(
-      ctx.redis,
-      cacheKey,
-      ranked,
-      ctx.cfg.ranking.cacheTtlSeconds,
+    // Compute detached, and wait only as long as we can afford to.
+    //
+    // The AppView aborts a getFeedSkeleton call at 10 seconds and renders the
+    // timeout as "the feed server appears to be offline" — a the-feed-is-broken
+    // message, shown for a feed that is merely cold. A first load can genuinely
+    // approach that: the inline import is bounded separately from hydration,
+    // and if the ranker comes up empty the cold-start feed hydrates all over
+    // again, each stage honouring its own deadline with nothing capping the sum.
+    //
+    // So losing this race means "answer now, keep working", never "abandon the
+    // work": the computation runs on and caches, which is what makes telling
+    // the viewer to pull again honest rather than a guess.
+    const computing = prepareRanked(ctx, viewerDid, feed, viewerLangs, cacheKey)
+    // A failure arriving after we stop waiting must not become an unhandled
+    // rejection; while we are still waiting, the race below rethrows it.
+    void computing.catch(() => {})
+    const withinBudget = await raceBudget(
+      computing,
+      ctx.cfg.ranking.requestBudgetMs,
     )
-    // Densify the co-liker graph for this viewer's seed posts in the background
-    // (never blocks the skeleton response). On completion it invalidates this
-    // viewer's cached lists so the next load reflects the denser graph. Only the
-    // CF ranker traverses co-likers, so the follows feed skips this entirely.
-    if (viewerDid && feed.ranker === 'cf') void backfillSeedColikers(ctx, viewerDid)
+    if (!withinBudget) {
+      console.log(
+        `[foryou] feed=${feed.rkey} viewer=${viewerDid ?? 'anon'} still preparing after ` +
+          `${ctx.cfg.ranking.requestBudgetMs}ms; asking the client to retry`,
+      )
+      throw feedPreparing()
+    }
+    ranked = withinBudget
   } else if (offset === 0 && viewerDid) {
     // A no-cursor request is a refresh: re-demote posts seen since this snapshot
     // was built so the reload surfaces the next unseen posts. Cheap — reuses the
@@ -103,6 +97,89 @@ export const handler = async (
   // put it there (see algos/feed-entry.ts).
   return { cursor, feed: slice.map(toSkeletonPost) }
 }
+
+// The cache-miss path: import whatever this feed's ranker needs to know about
+// the viewer, rank, bake in the seen-aware order, and cache. Returns the list it
+// cached. Runs detached from the request that started it (see handler), so it
+// must own its own side effects rather than leaving any to the caller.
+const prepareRanked = async (
+  ctx: AppContext,
+  viewerDid: string | null,
+  feed: FeedDef,
+  viewerLangs: string[],
+  cacheKey: string,
+): Promise<string[]> => {
+  // Import what this feed's ranker needs about the viewer before ranking: the
+  // CF feed needs their like history (its seed), the follows feed needs their
+  // follow list. Both crawl the viewer's own PDS in two stages (once per TTL):
+  // a small inline first slice we AWAIT here so the first load can already
+  // personalize, plus a background top-up for later loads. The wall-clock bound
+  // is in addition to the inline slice's own size cap, so a slow PDS cannot on
+  // its own consume the request budget: on a timeout the import lands in the
+  // background and invalidates this cache, personalizing the next load.
+  // Anonymous / no-history viewers get the cold-start popularity feed.
+  if (viewerDid) {
+    await (feed.ranker === 'follows'
+      ? raceDeadline(
+          ensureFollowsSynced(ctx, viewerDid),
+          ctx.cfg.follows.inlineDeadlineMs,
+        )
+      : raceDeadline(
+          ensureViewerBackfilled(ctx, viewerDid),
+          ctx.cfg.ranking.inlineBackfillDeadlineMs,
+        ))
+  }
+  const scored = await computeRanked(ctx, viewerDid, feed, viewerLangs)
+  // Bake the seen-aware order in now so every page is a plain offset slice.
+  const ranked = await orderBySeen(ctx, viewerDid, scored)
+  await cacheRankedList(
+    ctx.redis,
+    cacheKey,
+    ranked,
+    ctx.cfg.ranking.cacheTtlSeconds,
+  )
+  // Densify the co-liker graph for this viewer's seed posts in the background
+  // (never blocks the skeleton response). On completion it invalidates this
+  // viewer's cached lists so the next load reflects the denser graph. Only the
+  // CF ranker traverses co-likers, so the follows feed skips this entirely.
+  if (viewerDid && feed.ranker === 'cf') void backfillSeedColikers(ctx, viewerDid)
+  return ranked
+}
+
+// Awaits `p` for at most `ms`, resolving to null if it loses. `p` is left
+// running — the caller relies on it finishing and caching.
+const raceBudget = async <T>(p: Promise<T>, ms: number): Promise<T | null> => {
+  let timer: NodeJS.Timeout | undefined
+  const expiry = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms)
+  })
+  try {
+    return await Promise.race([p, expiry])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+export const FEED_PREPARING_MESSAGE =
+  'Your feed is still being prepared. Pull to refresh in a few seconds.'
+
+// 429, deliberately, and nothing to do with rate limiting.
+//
+// The client chooses its headline from the error it gets back. A timeout reads
+// as "the feed server appears to be offline"; every status it does not
+// recognise reads as "some kind of issue occurred - please let the feed owner
+// know". Both blame a feed that is merely cold, and both put a "View profile"
+// button under it, which is how a cold start turns into support mail. 429 is
+// the single branch that renders as "temporarily unavailable, please try again
+// later" with no blame and no button — and the AppView passes any non-500
+// status straight through (toDownstreamError), so the status and our own
+// message both survive the hop and the message prints underneath.
+const feedPreparing = (): XRPCError =>
+  new XRPCError(
+    ResponseType.RateLimitExceeded,
+    FEED_PREPARING_MESSAGE,
+    'FeedPreparing',
+  )
 
 // Partition the scored list into unseen-then-seen (order preserved within each
 // group). A refresh surfaces fresh content first, but nothing is ever dropped —
