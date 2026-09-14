@@ -161,6 +161,9 @@ export const makeContext = (opts: {
   follows?: Partial<FollowsConfig>
   pickerDid?: string
   authorIndex?: RecentAuthorIndex
+  // When set, getPosts throws the way @atproto/xrpc does when the AppView's
+  // response fails lexicon validation: the parsed body rides on the error.
+  appviewInvalidResponse?: boolean
   // the viewer's follow list, as the `follows` table would return it
   followedDids?: string[]
   // post URIs the viewer has already liked, as the `likes` table would
@@ -185,7 +188,14 @@ export const makeContext = (opts: {
         feed: {
           getPosts: async ({ uris }: { uris: string[] }) => {
             appviewRequests.push(uris)
-            return { data: { posts: available.filter((p) => uris.includes(p.uri)) } }
+            const posts = available.filter((p) => uris.includes(p.uri))
+            if (opts.appviewInvalidResponse) {
+              throw Object.assign(new Error('Invalid Response'), {
+                lexiconNsid: 'app.bsky.feed.getPosts',
+                responseBody: { posts },
+              })
+            }
+            return { data: { posts } }
           },
         },
       },
