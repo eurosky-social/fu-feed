@@ -1,6 +1,8 @@
 export type DatabaseSchema = {
   likes: Like
+  reposts: Repost
   post_meta: PostMeta
+  follows: Follow
   seen: Seen
   interactions: Interaction
   sub_state: SubState
@@ -45,6 +47,38 @@ export type PostMeta = {
   langs: string
   // when this metadata was last refreshed (ISO 8601)
   hydrated_at: string
+}
+
+// One row per repost record off the firehose, ingested only when a follows feed
+// is configured (see FollowsConfig.repostWeight). Reposts are a second, scarcer
+// engagement signal on a post, and — when the follows feed opts in — a way for a
+// stranger's post to enter the feed because someone you follow amplified it.
+// The collaborative filter does not read this table.
+export type Repost = {
+  // the repost record's own at-uri: at://<reposter>/app.bsky.feed.repost/<rkey>
+  uri: string
+  // the DID of the user who reposted
+  reposter_did: string
+  // the reposted post's at-uri
+  subject_uri: string
+  // record createdAt (ISO 8601), as authored
+  created_at: string
+  // when we ingested the repost (ISO 8601)
+  indexed_at: string
+}
+
+// A viewer's follow edges, crawled from their PDS on demand — the follows
+// feed's audience definition. Unlike `likes` this is NOT network-wide: only
+// viewers who have actually asked for the feed are in here, and only up to
+// FollowsConfig.maxFollows each.
+export type Follow = {
+  viewer_did: string
+  // the followed account's DID (app.bsky.graph.follow's subject is a bare DID)
+  subject_did: string
+  // the follow record's createdAt (ISO 8601), as authored
+  created_at: string
+  // when we crawled it (ISO 8601)
+  indexed_at: string
 }
 
 // Optional: posts a viewer has already been shown, fed by interactionSeen.

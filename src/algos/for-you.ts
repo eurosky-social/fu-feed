@@ -2,12 +2,14 @@ import { QueryParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
 import { AppContext, FeedDef } from '../config'
 import { CollaborativeFilterRanker } from '../ranker/collaborative'
 import { GraphRanker } from '../ranker/graph'
+import { FollowsRanker } from '../ranker/follows'
 import { PopularityRanker } from '../ranker/popularity'
-import { Ranker, ContentFilter } from '../ranker/types'
+import { Ranker } from '../ranker/types'
 import {
   ensureViewerBackfilled,
   backfillSeedColikers,
 } from '../ranker/backfill'
+import { ensureFollowsSynced } from '../ranker/follows-backfill'
 import {
   cacheRankedList,
   recacheRankedList,
@@ -18,6 +20,7 @@ import {
 
 const cfRanker: Ranker = new CollaborativeFilterRanker()
 const graphRanker: Ranker = new GraphRanker()
+const followsRanker: Ranker = new FollowsRanker()
 // Concrete type (not Ranker): its rank() takes an extra cold-start language arg.
 const popularityRanker = new PopularityRanker()
 
@@ -48,23 +51,28 @@ export const handler = async (
 
   let ranked = await getRankedList(ctx.redis, cacheKey)
   if (!ranked) {
-    // Backfill the viewer's like history so a viewer who already has likes is
-    // personalized rather than dropped to popularity. ensureViewerBackfilled runs
-    // two stages (once per backfill TTL): a small inline first slice we AWAIT here
-    // so the first load can personalize, plus a background top-up to the full seed
-    // for later loads. We bound the wait by wall-clock (inlineBackfillDeadlineMs)
-    // in addition to the inline slice's own size cap, so a slow PDS can never trip
-    // the AppView's feed-fetch timeout ("feed unavailable" / "upstream
-    // unreachable"): on a timeout we serve the cold-start feed now and the
-    // backfill invalidates the cache when it lands, personalizing the next load.
+    // Import what this feed's ranker needs about the viewer before ranking: the
+    // CF feed needs their like history (its seed), the follows feed needs their
+    // follow list. Both crawl the viewer's own PDS in two stages (once per TTL):
+    // a small inline first slice we AWAIT here so the first load can already
+    // personalize, plus a background top-up for later loads. We bound the wait by
+    // wall-clock in addition to the inline slice's own size cap, so a slow PDS can
+    // never trip the AppView's feed-fetch timeout ("feed unavailable" / "upstream
+    // unreachable"): on a timeout we serve the cold-start feed now, and the import
+    // invalidates the cache when it lands, personalizing the next load.
     // Anonymous / no-history viewers get the cold-start popularity feed.
     if (viewerDid) {
-      await raceDeadline(
-        ensureViewerBackfilled(ctx, viewerDid),
-        ctx.cfg.ranking.inlineBackfillDeadlineMs,
-      )
+      await (feed.ranker === 'follows'
+        ? raceDeadline(
+            ensureFollowsSynced(ctx, viewerDid),
+            ctx.cfg.follows.inlineDeadlineMs,
+          )
+        : raceDeadline(
+            ensureViewerBackfilled(ctx, viewerDid),
+            ctx.cfg.ranking.inlineBackfillDeadlineMs,
+          ))
     }
-    const scored = await computeRanked(ctx, viewerDid, feed.content, viewerLangs)
+    const scored = await computeRanked(ctx, viewerDid, feed, viewerLangs)
     // Bake the seen-aware order in now so every page is a plain offset slice.
     ranked = await orderBySeen(ctx, viewerDid, scored)
     await cacheRankedList(
@@ -75,8 +83,9 @@ export const handler = async (
     )
     // Densify the co-liker graph for this viewer's seed posts in the background
     // (never blocks the skeleton response). On completion it invalidates this
-    // viewer's cached lists so the next load reflects the denser graph.
-    if (viewerDid) void backfillSeedColikers(ctx, viewerDid)
+    // viewer's cached lists so the next load reflects the denser graph. Only the
+    // CF ranker traverses co-likers, so the follows feed skips this entirely.
+    if (viewerDid && feed.ranker === 'cf') void backfillSeedColikers(ctx, viewerDid)
   } else if (offset === 0 && viewerDid) {
     // A no-cursor request is a refresh: re-demote posts seen since this snapshot
     // was built so the reload surfaces the next unseen posts. Cheap — reuses the
@@ -113,12 +122,18 @@ const orderBySeen = async (
 const computeRanked = async (
   ctx: AppContext,
   viewerDid: string | null,
-  content: ContentFilter,
+  feed: FeedDef,
   viewerLangs: string[],
 ): Promise<string[]> => {
+  const content = feed.content
   // Personalized first; fall back to popularity for anonymous / no-history
-  // viewers and while the graph is still building.
-  const engine = ctx.cfg.rankerEngine === 'graph' ? graphRanker : cfRanker
+  // viewers and while the graph or the author index is still building.
+  const engine =
+    feed.ranker === 'follows'
+      ? followsRanker
+      : ctx.cfg.rankerEngine === 'graph'
+        ? graphRanker
+        : cfRanker
   let personalized: string[] = []
   try {
     personalized = await engine.rank(ctx, viewerDid, content)

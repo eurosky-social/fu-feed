@@ -103,6 +103,102 @@ Because media is a fraction of all posts, content feeds **over-generate** candid
 (`maxCandidates × FEEDGEN_MEDIA_CANDIDATE_MULTIPLIER`) before applying the media filter, so a photo or
 video feed isn't starved by a content-blind candidate cap.
 
+## The follows feed
+
+An optional second algorithm on the same service: **the most engaging recent posts from the accounts
+you follow**. Set `FEEDGEN_FOLLOWS_FEED_RKEY` to the rkey you publish for it; leave it unset and none
+of the machinery below is built.
+
+It is deliberately the inverse of the collaborative filter. The CF feed works out *who* shares your
+taste and divides by popularity to surface niche posts; the follows feed takes the audience as given
+and lets raw engagement win — the traditional home-feed shape. Both share the same back half
+(`ranker/finalize.ts`), so they get identical time-decay, freshness, adult/reply filtering and
+per-author diversification.
+
+```
+follow list (crawled from the viewer's PDS, once per TTL)
+      │
+      ▼
+author index ──► posts those accounts wrote (and optionally reposted) in the last ~48h,
+      │          scored as likes + repostWeight × reposts
+      ▼
+finalize ──► decay · freshness · adult/reply · diversify ──► ranked URIs
+```
+
+### Why a second index, not the like graph
+
+The two structures answer different questions and are sized accordingly:
+
+| | like graph (`graph/csr-like-graph.ts`) | author index (`graph/recent-author-index.ts`) |
+|---|---|---|
+| Question | "who else liked the posts I liked" | "what did these authors post, and did it land" |
+| Needs | every liker's **identity**, 30-day window | a **count** per post, ~48h window |
+| Cost | ~500M edges, tens of GB | ~10M posts, order 1 GB |
+
+Dropping liker identity and shrinking the window is what makes the follows feed cheap to add here —
+one to two orders of magnitude below the graph, on the same box. Most of that gigabyte is interned
+post URIs, so the footprint scales with `FEEDGEN_FOLLOWS_WINDOW_HOURS` (the lever to pull if memory
+is tight), and a compaction transiently doubles the surviving set while it rebuilds around it.
+
+It is kept structurally separate rather than bolted onto the CSR build so that the ranker, the index
+and the `follows` table lift out as a unit if it ever needs its own process.
+
+The index is filled once from Postgres at boot (hours of likes, not weeks — so this feed comes up
+long before a full graph build would finish), then maintained live from the firehose. It has no
+rebuild; a periodic compaction drops aged-out posts and reclaims their memory.
+
+### Reposts
+
+Reposts are the second engagement signal, ingested on **their own Jetstream subscription** with their
+own cursor — not as a second collection on the like socket. That isolation is deliberate: likes are
+the collaborative filter's entire input, and nothing belonging to this feed should be able to stall
+it. Set `FEEDGEN_FOLLOWS_REPOST_WEIGHT=0` and the subscription is never opened at all.
+
+They are used two ways:
+
+- **As engagement** (on by default): a post's score is `likes + repostWeight × reposts`, so a repost
+  — scarcer and more deliberate than a like — counts for more.
+- **As content** (`FEEDGEN_FOLLOWS_INCLUDE_REPOSTS`, off by default): a post reposted *by* someone
+  you follow enters the feed even when its author is a stranger — the traditional home-feed
+  behaviour. It is off because the feed skeleton carries no repost `reason` yet, so such a post
+  arrives in clients with no "reposted by" attribution and reads as a stranger appearing from
+  nowhere. Plumbing the reason through means carrying it in the cached ranked list, which is the
+  prerequisite for turning this on by default.
+
+`reposts` rows are kept only twice the candidate window (not the 90-day like retention), since
+nothing reads them beyond the index seed.
+
+### Coverage
+
+A post enters the index only by being liked or reposted, so a followed account's post with **no
+engagement at all anywhere on the network** can never surface. For "bubble the most engaging up" that
+is the definition of the feed — but it does mean this is not a complete algorithmic-timeline
+replacement.
+
+### Isolation from the collaborative filter
+
+The follows feed shares the `likes` table, `post_meta`, `finalize()` and the Redis ranked-list cache
+with the CF feed, and nothing else. Everything it adds is either conditional on
+`FEEDGEN_FOLLOWS_FEED_RKEY` being set (the author index, the repost subscription, the `follows` and
+`reposts` sweeps) or inert without it (`authorIndex?.` no-ops on the like ingest path). Cache
+invalidation is scoped by ranker, so a follow-list sync never drops a viewer's CF list and a like
+backfill never drops their follows list.
+
+The one measurable effect on the CF feed is boot ordering: the author index seeds **before** the like
+graph builds, because it scans hours where the graph scans weeks. That delays the graph's first build
+by the seed's duration (minutes against its own tens of minutes), in exchange for the follows feed
+coming up almost immediately rather than waiting the whole build out. Both feeds serve the cold-start
+popularity list until their structure is ready. Swap the two blocks in `FeedGenerator.start()` to
+reverse the trade.
+
+### Follow lists
+
+Follow edges are **not** ingested from the firehose — that would carry network-wide follow traffic for
+the handful of viewers who use the feed. Each viewer's list is crawled from their own PDS
+(`com.atproto.repo.listRecords`, public, no auth) on their first request and re-crawled once per
+`FEEDGEN_FOLLOWS_SYNC_TTL_SECONDS`, in the same two-stage inline/background shape as the like
+backfill. The full background pass is authoritative, so unfollows disappear.
+
 ## Getting started
 
 ```bash

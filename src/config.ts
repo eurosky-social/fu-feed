@@ -3,10 +3,21 @@ import { DidResolver } from '@atproto/identity'
 import { Redis } from 'ioredis'
 import { AtpAgent } from '@atproto/api'
 import type { ILikeGraph } from './graph/types'
+import type { RecentAuthorIndex } from './graph/recent-author-index'
 import type { ContentFilter } from './ranker/types'
 
-// A published feed: its record rkey and the content it restricts to.
-export type FeedDef = { rkey: string; content: ContentFilter }
+// Which algorithm computes a feed's results:
+//   'cf'      collaborative filter — taste-neighbours' picks (the fu feed)
+//   'follows' engagement ranking over the posts of accounts the viewer follows
+export type FeedRanker = 'cf' | 'follows'
+
+// A published feed: its record rkey, the algorithm behind it, and the content
+// it restricts to.
+export type FeedDef = {
+  rkey: string
+  ranker: FeedRanker
+  content: ContentFilter
+}
 
 export type AppContext = {
   db: Database
@@ -17,6 +28,9 @@ export type AppContext = {
   publicAgent: AtpAgent
   // In-memory like-graph engine (present when rankerEngine === 'graph').
   graph?: ILikeGraph
+  // Author -> recently-liked-posts index (present when a follows feed is
+  // configured). Independent of `graph` — see graph/recent-author-index.ts.
+  authorIndex?: RecentAuthorIndex
   cfg: Config
 }
 
@@ -55,7 +69,56 @@ export type Config = {
   // Background densification of the co-liker graph for a viewer's seed posts
   // via app.bsky.feed.getLikes (see ranker/backfill.ts).
   colikerBackfill: ColikerBackfillConfig
+  // Knobs for the follows feed. Inert unless a feed with ranker 'follows' is
+  // configured.
+  follows: FollowsConfig
   ranking: RankingConfig
+}
+
+// The follows feed: "what did the accounts I follow post that got engagement".
+// Its two moving parts are the in-memory author index (graph/recent-author-
+// index.ts) and the per-viewer follow-list crawl (ranker/follows-backfill.ts).
+export type FollowsConfig = {
+  // hours of recently-liked posts held in the author index — the candidate
+  // window. Keep it >= ranking.freshnessHours, or finalize's age filter is
+  // starved of candidates it would otherwise accept.
+  windowHours: number
+  // how often the index drops aged-out posts and reclaims their memory
+  compactIntervalMs: number
+  // how long a viewer's crawled follow list is trusted before a re-crawl, in
+  // seconds. Doubles as the stampede lock duration.
+  syncTtlSeconds: number
+  // follows imported inline on a viewer's first request (one listRecords page),
+  // so that first load already reflects who they follow
+  inlineLimit: number
+  // wall-clock budget for that inline crawl; on expiry the viewer gets the
+  // cold-start feed and the crawl finishes in the background
+  inlineDeadlineMs: number
+  // hard cap on the follows imported per viewer
+  maxFollows: number
+  // per-author scan cap during candidate generation, newest-first
+  maxPostsPerAuthor: number
+  // minimum in-window engagement score for a post to be a candidate, where the
+  // score is likes + repostWeight x reposts (1 = off: a post only enters the
+  // index by being engaged with at all)
+  minEngagement: number
+  // divide a post's score by its author's in-window mean^power, so a small
+  // account's standout post can compete with a large account's routine one
+  // (0 = off, raw engagement; 1 = full normalization)
+  authorNormalization: number
+  // include replies on this feed, overriding ranking.includeReplies
+  includeReplies: boolean
+  // what one repost is worth relative to one like when scoring engagement.
+  // Reposts are the scarcer, more deliberate signal, so they weigh more.
+  // 0 ignores reposts entirely (and stops them being ingested at all).
+  repostWeight: number
+  // also treat a post reposted BY someone the viewer follows as content, even
+  // when its author is a stranger — the traditional home-feed behaviour. Off by
+  // default: the feed skeleton carries no repost `reason` yet, so such a post
+  // arrives in clients with no "reposted by" attribution (see README).
+  includeReposts: boolean
+  // per-reposter scan cap during candidate generation, newest-first
+  maxRepostsPerReposter: number
 }
 
 export type ColikerBackfillConfig = {

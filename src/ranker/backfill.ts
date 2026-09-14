@@ -1,7 +1,7 @@
 import { sql } from 'kysely'
 import { createHash } from 'crypto'
 import { AtpAgent } from '@atproto/api'
-import { AppContext } from '../config'
+import { AppContext, FeedRanker } from '../config'
 import { LIKE_COLLECTION, POST_PATH } from '../subscription'
 import { rankedListKey } from '../redis'
 
@@ -79,7 +79,7 @@ export const ensureViewerBackfilled = async (
     // No-op on the first request (nothing cached yet); it matters when the caller
     // hit its deadline and already served + cached the cold-start feed, dropping
     // it so the next load is personalized.
-    if (first > 0) await invalidateViewerCache(ctx, viewerDid)
+    if (first > 0) await invalidateViewerCache(ctx, viewerDid, ['cf'])
   } catch (err) {
     console.error(`inline backfill failed for ${viewerDid}`, err)
     // release the flag so a later request can retry
@@ -96,7 +96,7 @@ export const ensureViewerBackfilled = async (
     void backfillViewerLikes(ctx, viewerDid, fullLimit)
       .then((total) => {
         console.log(`⤓ backfilled ${total} likes (full) for ${viewerDid}`)
-        if (total > 0) return invalidateViewerCache(ctx, viewerDid)
+        if (total > 0) return invalidateViewerCache(ctx, viewerDid, ['cf'])
       })
       .catch((err) =>
         console.error(`full backfill top-up failed for ${viewerDid}`, err),
@@ -193,7 +193,8 @@ export const backfillViewerLikes = async (
   return rows.length
 }
 
-const resolvePds = async (
+// Exported for the follow-list crawl, which resolves the same way.
+export const resolvePds = async (
   ctx: AppContext,
   did: string,
 ): Promise<string | undefined> => {
@@ -333,7 +334,7 @@ export const backfillSeedColikers = async (
       }
     }
 
-    if (inserted > 0) await invalidateViewerCache(ctx, viewerDid)
+    if (inserted > 0) await invalidateViewerCache(ctx, viewerDid, ['cf'])
     console.log(
       `⤓ co-liker backfill: ${viewerDid} densified ${densified}/${postsToDensify.length} ` +
         `seed posts (+${inserted} likes, ${skippablePosts.size} skipped: ` +
@@ -476,12 +477,22 @@ const backfillPostLikers = async (
   return rows.length
 }
 
-const invalidateViewerCache = async (
+// Drops a viewer's cached ranked lists so the next load reflects freshly
+// imported data. Exported so the follow-list crawl can do the same.
+//
+// `rankers` scopes it to the feeds the import can actually change: a like
+// backfill only moves the collaborative filter, a follow-list sync only moves
+// the follows feed. Invalidating the other's list would just force a needless
+// recompute of a feed whose inputs did not change.
+export const invalidateViewerCache = async (
   ctx: AppContext,
   viewerDid: string,
+  rankers: FeedRanker[],
 ): Promise<void> => {
   try {
-    const keys = ctx.cfg.feeds.map((f) => rankedListKey(f.rkey, viewerDid))
+    const keys = ctx.cfg.feeds
+      .filter((f) => rankers.includes(f.ranker))
+      .map((f) => rankedListKey(f.rkey, viewerDid))
     if (keys.length > 0) await ctx.redis.del(...keys)
   } catch (err) {
     console.error('viewer cache invalidation failed', err)

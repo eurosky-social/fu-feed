@@ -1,4 +1,4 @@
-import { GraphConfig, RankingConfig } from '../../src/config'
+import { FollowsConfig, GraphConfig, RankingConfig } from '../../src/config'
 
 // Deterministic ranking config: recency/corater decays are off so a test's
 // expected scores depend only on the graph structure under test.
@@ -50,3 +50,24 @@ const HOUR = 60 * 60 * 1000
 // ISO timestamp `hours` in the past — matches the varchar format the app writes.
 export const hoursAgo = (hours: number, from = Date.now()): string =>
   new Date(from - hours * HOUR).toISOString()
+
+// Follows-feed config with the tuning knobs off, so a test's expected order
+// depends only on the like counts in its fixture.
+export const followsConfig = (
+  overrides: Partial<FollowsConfig> = {},
+): FollowsConfig => ({
+  windowHours: 48,
+  compactIntervalMs: 30 * 60 * 1000,
+  syncTtlSeconds: 21600,
+  inlineLimit: 100,
+  inlineDeadlineMs: 1500,
+  maxFollows: 2000,
+  maxPostsPerAuthor: 200,
+  minEngagement: 1,
+  authorNormalization: 0,
+  includeReplies: false,
+  repostWeight: 2,
+  includeReposts: false,
+  maxRepostsPerReposter: 200,
+  ...overrides,
+})

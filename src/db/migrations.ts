@@ -162,3 +162,57 @@ migrations['005'] = {
     await db.schema.alterTable('post_meta').dropColumn('langs').execute()
   },
 }
+
+migrations['006'] = {
+  async up(db: Kysely<unknown>) {
+    // Per-viewer follow edges for the follows feed (see db/schema.ts). Crawled
+    // from the viewer's PDS, not the firehose, so this table only ever holds
+    // viewers who have requested that feed.
+    await db.schema
+      .createTable('follows')
+      .addColumn('viewer_did', 'varchar', (col) => col.notNull())
+      .addColumn('subject_did', 'varchar', (col) => col.notNull())
+      .addColumn('created_at', 'varchar', (col) => col.notNull())
+      .addColumn('indexed_at', 'varchar', (col) => col.notNull())
+      .addPrimaryKeyConstraint('follows_pk', ['viewer_did', 'subject_did'])
+      .execute()
+
+    // The only read shape: one viewer's whole follow list, newest follows
+    // first (that ordering is what the maxFollows cap keeps when it bites).
+    await db.schema
+      .createIndex('follows_viewer_created_idx')
+      .on('follows')
+      .columns(['viewer_did', 'created_at'])
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('follows').execute()
+  },
+}
+
+migrations['007'] = {
+  async up(db: Kysely<unknown>) {
+    // Repost edges for the follows feed (see db/schema.ts). Written by a
+    // separate Jetstream subscription that only runs when a follows feed is
+    // configured, so a collaborative-filter-only deployment stays empty here.
+    await db.schema
+      .createTable('reposts')
+      .addColumn('uri', 'varchar', (col) => col.primaryKey())
+      .addColumn('reposter_did', 'varchar', (col) => col.notNull())
+      .addColumn('subject_uri', 'varchar', (col) => col.notNull())
+      .addColumn('created_at', 'varchar', (col) => col.notNull())
+      .addColumn('indexed_at', 'varchar', (col) => col.notNull())
+      .execute()
+
+    // The index seed pages by ingest time, and the retention sweep prunes by
+    // it — the same two access patterns `likes` has.
+    await db.schema
+      .createIndex('reposts_indexed_idx')
+      .on('reposts')
+      .column('indexed_at')
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('reposts').execute()
+  },
+}

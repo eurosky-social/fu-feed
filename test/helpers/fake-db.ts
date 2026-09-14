@@ -9,10 +9,11 @@ import {
   QueryResult,
 } from 'kysely'
 import { AtpAgent } from '@atproto/api'
-import { AppContext, RankingConfig } from '../../src/config'
+import { AppContext, FollowsConfig, RankingConfig } from '../../src/config'
 import { Database } from '../../src/db'
 import { DatabaseSchema } from '../../src/db/schema'
-import { rankingConfig } from './config'
+import { RecentAuthorIndex } from '../../src/graph/recent-author-index'
+import { followsConfig, rankingConfig } from './config'
 
 export type QueryHandler = (query: CompiledQuery) => unknown[]
 
@@ -157,9 +158,24 @@ export const makeContext = (opts: {
   cachedMeta?: PostMetaRow[]
   appviewPosts?: ReturnType<typeof appviewPost>[]
   ranking?: Partial<RankingConfig>
+  follows?: Partial<FollowsConfig>
   pickerDid?: string
+  authorIndex?: RecentAuthorIndex
+  // the viewer's follow list, as the `follows` table would return it
+  followedDids?: string[]
+  // post URIs the viewer has already liked, as the `likes` table would
+  alreadyLiked?: string[]
 }): TestContext => {
-  const { db } = makeFakeDb(postMetaHandler(opts.cachedMeta ?? []))
+  const meta = postMetaHandler(opts.cachedMeta ?? [])
+  const { db } = makeFakeDb((query) => {
+    if (query.sql.includes('from "follows"')) {
+      return (opts.followedDids ?? []).map((did) => ({ subject_did: did }))
+    }
+    if (query.sql.includes('from "likes"')) {
+      return (opts.alreadyLiked ?? []).map((uri) => ({ subject_uri: uri }))
+    }
+    return meta(query)
+  })
   const available = opts.appviewPosts ?? []
   const appviewRequests: string[][] = []
 
@@ -181,8 +197,10 @@ export const makeContext = (opts: {
     redis: {} as never,
     didResolver: {} as never,
     publicAgent,
+    authorIndex: opts.authorIndex,
     cfg: {
       ranking: rankingConfig(opts.ranking),
+      follows: followsConfig(opts.follows),
       pickerDid: opts.pickerDid,
     },
   } as unknown as AppContext

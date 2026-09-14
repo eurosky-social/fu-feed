@@ -2,15 +2,23 @@ import dotenv from 'dotenv'
 import FeedGenerator from './server'
 import { RankingConfig, FeedDef } from './config'
 
-// The main feed plus optional image/video variants (all share one graph).
+// The collaborative-filter feed plus optional image/video variants (all share
+// one graph), and the optional follows feed (its own index — see
+// graph/recent-author-index.ts).
 const buildFeeds = (): FeedDef[] => {
   const feeds: FeedDef[] = [
-    { rkey: maybeStr(process.env.FEEDGEN_FEED_SHORTNAME) ?? 'for-you', content: 'all' },
+    {
+      rkey: maybeStr(process.env.FEEDGEN_FEED_SHORTNAME) ?? 'for-you',
+      ranker: 'cf',
+      content: 'all',
+    },
   ]
   const image = maybeStr(process.env.FEEDGEN_IMAGE_FEED_RKEY)
-  if (image) feeds.push({ rkey: image, content: 'image' })
+  if (image) feeds.push({ rkey: image, ranker: 'cf', content: 'image' })
   const video = maybeStr(process.env.FEEDGEN_VIDEO_FEED_RKEY)
-  if (video) feeds.push({ rkey: video, content: 'video' })
+  if (video) feeds.push({ rkey: video, ranker: 'cf', content: 'video' })
+  const follows = maybeStr(process.env.FEEDGEN_FOLLOWS_FEED_RKEY)
+  if (follows) feeds.push({ rkey: follows, ranker: 'follows', content: 'all' })
   return feeds
 }
 
@@ -111,6 +119,33 @@ const run = async () => {
       seedPosts:
         maybeInt(process.env.FEEDGEN_COLIKER_BACKFILL_SEED_POSTS) ?? 50,
       maxPages: maybeInt(process.env.FEEDGEN_COLIKER_BACKFILL_MAX_PAGES) ?? 3,
+    },
+    follows: {
+      // Keep >= FEEDGEN_FRESHNESS_HOURS: this is the candidate window, and
+      // finalize's age filter can only cut what the index offers it.
+      windowHours: maybeInt(process.env.FEEDGEN_FOLLOWS_WINDOW_HOURS) ?? 48,
+      compactIntervalMs:
+        maybeInt(process.env.FEEDGEN_FOLLOWS_COMPACT_INTERVAL_MS) ??
+        30 * 60 * 1000,
+      syncTtlSeconds:
+        maybeInt(process.env.FEEDGEN_FOLLOWS_SYNC_TTL_SECONDS) ?? 21600, // 6h
+      inlineLimit: maybeInt(process.env.FEEDGEN_FOLLOWS_INLINE_LIMIT) ?? 100,
+      inlineDeadlineMs:
+        maybeInt(process.env.FEEDGEN_FOLLOWS_INLINE_DEADLINE_MS) ?? 1500,
+      maxFollows: maybeInt(process.env.FEEDGEN_FOLLOWS_MAX) ?? 2000,
+      maxPostsPerAuthor:
+        maybeInt(process.env.FEEDGEN_FOLLOWS_MAX_POSTS_PER_AUTHOR) ?? 200,
+      minEngagement: maybeInt(process.env.FEEDGEN_FOLLOWS_MIN_ENGAGEMENT) ?? 1,
+      authorNormalization:
+        maybeFloat(process.env.FEEDGEN_FOLLOWS_AUTHOR_NORMALIZATION) ?? 0,
+      includeReplies: process.env.FEEDGEN_FOLLOWS_INCLUDE_REPLIES === 'true',
+      // A repost is the scarcer, more deliberate signal, so it outweighs a like.
+      // 0 switches repost ingestion off entirely.
+      repostWeight: maybeFloat(process.env.FEEDGEN_FOLLOWS_REPOST_WEIGHT) ?? 2,
+      includeReposts:
+        process.env.FEEDGEN_FOLLOWS_INCLUDE_REPOSTS === 'true',
+      maxRepostsPerReposter:
+        maybeInt(process.env.FEEDGEN_FOLLOWS_MAX_REPOSTS_PER_REPOSTER) ?? 200,
     },
     hostname,
     serviceDid,

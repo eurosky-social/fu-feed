@@ -17,6 +17,11 @@ export type FinalizeOptions = {
   // feed never recommends you back to yourself (a taste-neighbor liking your
   // post makes it a candidate). null/undefined for anonymous viewers.
   viewerDid?: string | null
+  // per-feed override of ranking.includeReplies. A reply from a taste-neighbour
+  // is usually context-free noise, but a reply from someone you follow often
+  // isn't — so the follows feed gets to answer this differently. Undefined
+  // leaves the global setting in force.
+  includeReplies?: boolean
 }
 
 // Chooses which candidates are worth a hydration round-trip.
@@ -83,6 +88,8 @@ export const finalize = async (
   const langAllow =
     opts.languages && opts.languages.length > 0 ? new Set(opts.languages) : null
 
+  const includeReplies = opts.includeReplies ?? cfg.includeReplies
+
   const scored: { uri: string; author: string; score: number }[] = []
   for (const [uri, raw] of rawScores) {
     const meta = metas.get(uri)
@@ -93,7 +100,7 @@ export const finalize = async (
     // not content. (Their likes are also exempt from the retention sweep.)
     if (ctx.cfg.pickerDid && meta.author_did === ctx.cfg.pickerDid) continue
     if (meta.is_adult) continue
-    if (meta.is_reply && !cfg.includeReplies) continue // top-level posts only
+    if (meta.is_reply && !includeReplies) continue // top-level posts only
     if (opts.content === 'image' && !meta.is_image) continue
     if (opts.content === 'video' && !meta.is_video) continue
     // Language allowlist: undeclared posts pass; declared ones must overlap.

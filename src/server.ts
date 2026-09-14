@@ -10,9 +10,14 @@ import describeGenerator from './methods/describe-generator'
 import sendInteractions from './methods/send-interactions'
 import { createDb, Database, migrateToLatest } from './db'
 import { createRedis } from './redis'
-import { LikesIngester, startRetentionSweep } from './subscription'
+import {
+  LikesIngester,
+  RepostsIngester,
+  startRetentionSweep,
+} from './subscription'
 import { LikeGraph } from './graph/like-graph'
 import { CsrLikeGraph } from './graph/csr-like-graph'
+import { RecentAuthorIndex } from './graph/recent-author-index'
 import { ILikeGraph } from './graph/types'
 import { AppContext, Config } from './config'
 import { prewarmColdStart } from './algos/for-you'
@@ -24,18 +29,23 @@ export class FeedGenerator {
   public db: Database
   public redis: Redis
   public ingester: LikesIngester
+  public repostsIngester?: RepostsIngester
   public graph?: ILikeGraph
+  public authorIndex?: RecentAuthorIndex
   public cfg: Config
   public ctx: AppContext
   private retentionTimer?: NodeJS.Timeout
   private rebuildTimer?: NodeJS.Timeout
+  private compactTimer?: NodeJS.Timeout
 
   constructor(
     app: express.Application,
     db: Database,
     redis: Redis,
     ingester: LikesIngester,
+    repostsIngester: RepostsIngester | undefined,
     graph: ILikeGraph | undefined,
+    authorIndex: RecentAuthorIndex | undefined,
     cfg: Config,
     ctx: AppContext,
   ) {
@@ -43,7 +53,9 @@ export class FeedGenerator {
     this.db = db
     this.redis = redis
     this.ingester = ingester
+    this.repostsIngester = repostsIngester
     this.graph = graph
+    this.authorIndex = authorIndex
     this.cfg = cfg
     this.ctx = ctx
   }
@@ -58,12 +70,30 @@ export class FeedGenerator {
           ? new CsrLikeGraph(cfg.graph, cfg.databaseUrl)
           : new LikeGraph(cfg.graph)
         : undefined
+    // Only built when a follows feed is actually published — it is inert
+    // otherwise, and the seed scan is not free.
+    const authorIndex = cfg.feeds.some((f) => f.ranker === 'follows')
+      ? new RecentAuthorIndex(cfg.follows)
+      : undefined
     const ingester = new LikesIngester(
       db,
       cfg.jetstreamEndpoint,
       cfg.subscriptionReconnectDelay,
       graph,
+      authorIndex,
     )
+    // Reposts ride their own Jetstream subscription so nothing about the follows
+    // feed can stall the like stream the collaborative filter depends on. Not
+    // constructed at all unless reposts can affect a score.
+    const repostsIngester =
+      authorIndex && cfg.follows.repostWeight > 0
+        ? new RepostsIngester(
+            db,
+            cfg.jetstreamEndpoint,
+            cfg.subscriptionReconnectDelay,
+            authorIndex,
+          )
+        : undefined
 
     const didCache = new MemoryCache()
     const didResolver = new DidResolver({
@@ -89,6 +119,7 @@ export class FeedGenerator {
       didResolver,
       publicAgent,
       graph,
+      authorIndex,
       cfg,
     }
     feedGeneration(server, ctx)
@@ -99,7 +130,17 @@ export class FeedGenerator {
     app.use(server.xrpc.router)
     app.use(wellKnown(ctx))
 
-    return new FeedGenerator(app, db, redis, ingester, graph, cfg, ctx)
+    return new FeedGenerator(
+      app,
+      db,
+      redis,
+      ingester,
+      repostsIngester,
+      graph,
+      authorIndex,
+      cfg,
+      ctx,
+    )
   }
 
   // Postgres may not be resolvable yet when this process starts.
@@ -142,36 +183,55 @@ export class FeedGenerator {
 
   async start(): Promise<http.Server> {
     await this.migrateWithRetry()
-    // Build the in-memory graph in the background; until ready, requests fall
-    // back to the cold-start popularity feed. The boot build retries with
-    // backoff (a transient DB hiccup must not leave the graph cold until the
-    // next periodic tick). After the first success, rebuild on a fixed interval
-    // to refresh and apply retention/deletes.
-    if (this.graph) {
-      const graph = this.graph
-      const db = this.db
-      void (async () => {
-        let delay = 5000
-        while (!(await graph.buildFromPostgres(db))) {
-          console.warn(`🧠 like-graph boot build failed; retrying in ${delay}ms`)
-          await new Promise((res) => setTimeout(res, delay))
-          delay = Math.min(delay * 2, 60000)
-        }
-        // Start live ingestion only AFTER the first build so the build runs
-        // uncontended (~8x faster — the Jetstream consumer otherwise saturates
-        // the event loop). Jetstream resumes from its saved cursor, so no likes
-        // are missed during the build.
-        this.ingester.run()
+    // Build the in-memory structures in the background; until each is ready its
+    // feeds fall back to the cold-start popularity list. Boot builds retry with
+    // backoff — a transient DB hiccup must not leave them cold until the next
+    // periodic tick.
+    //
+    // Sequential, and live ingestion starts only once both are done, because a
+    // build runs ~8x faster uncontended (the Jetstream consumer otherwise
+    // saturates the event loop) and both scans stream the same table. Jetstream
+    // resumes from its saved cursor, so no likes are missed meanwhile.
+    //
+    // The author index goes first: it scans hours of likes where the graph
+    // scans weeks, so the follows feed comes up in minutes rather than waiting
+    // out a full graph build.
+    void (async () => {
+      if (this.authorIndex) {
+        const index = this.authorIndex
+        const db = this.db
+        await retryUntilBuilt('🗂️ follows index seed', () =>
+          index.seedFromPostgres(db),
+        )
+        // Compaction is the index's only maintenance: it has no rebuild, since
+        // the firehose keeps it current and only aged-out posts need reclaiming.
+        this.compactTimer = setInterval(
+          () => index.compact(),
+          this.cfg.follows.compactIntervalMs,
+        )
+      }
+      if (this.graph) {
+        const graph = this.graph
+        const db = this.db
+        await retryUntilBuilt('🧠 like-graph boot build', () =>
+          graph.buildFromPostgres(db),
+        )
+        // After the first success, rebuild on a fixed interval to refresh and
+        // apply retention/deletes.
         this.rebuildTimer = setInterval(
           () => graph.buildFromPostgres(db),
           this.cfg.graph.rebuildIntervalMs,
         )
-      })()
-    } else {
+      }
       this.ingester.run()
-    }
+      this.repostsIngester?.run()
+    })()
     this.retentionTimer = startRetentionSweep(this.db, this.cfg.retentionHours, {
       pickerDid: this.cfg.pickerDid,
+      sweepFollowsTables: this.authorIndex !== undefined,
+      // Twice the candidate window, so a seed after a restart always has a full
+      // window to read even if the sweep just ran.
+      repostsRetentionHours: Math.max(72, this.cfg.follows.windowHours * 2),
     })
     // Warm the shared cold-start popularity cache so the first cold-start load
     // after boot doesn't pay the heavy GROUP-BY (fire-and-forget; it self-heals
@@ -180,6 +240,20 @@ export class FeedGenerator {
     this.server = this.app.listen(this.cfg.port, this.cfg.listenhost)
     await events.once(this.server, 'listening')
     return this.server
+  }
+}
+
+// Runs `attempt` until it reports success, backing off between tries. Used for
+// the boot builds, where giving up would leave a structure cold indefinitely.
+const retryUntilBuilt = async (
+  what: string,
+  attempt: () => Promise<boolean>,
+): Promise<void> => {
+  let delay = 5000
+  while (!(await attempt())) {
+    console.warn(`${what} failed; retrying in ${delay}ms`)
+    await new Promise((res) => setTimeout(res, delay))
+    delay = Math.min(delay * 2, 60000)
   }
 }
 
