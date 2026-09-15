@@ -50,6 +50,13 @@ const run = async () => {
     coraterDecay: maybeFloat(process.env.FEEDGEN_CORATER_DECAY) ?? 0,
     seedRecencyMinWeight:
       maybeFloat(process.env.FEEDGEN_SEED_RECENCY_MIN_WEIGHT) ?? 0.1,
+    // 0.25, not 1: replayed against a captured graph, a penalty of 1 does not
+    // shade popular candidates down, it inverts the ranking — the top 30 goes
+    // from a median of ~134 in-graph likers to 1, i.e. entirely posts a single
+    // curator liked. 0.25 keeps corroborated posts on top while letting niche
+    // ones through (~13 of the top 30 change).
+    candidateDegreePenalty:
+      maybeFloat(process.env.FEEDGEN_CANDIDATE_DEGREE_PENALTY) ?? 0.25,
     minEligibleRaters: maybeInt(process.env.FEEDGEN_MIN_ELIGIBLE_RATERS) ?? 0,
     maxCandidates: maybeInt(process.env.FEEDGEN_MAX_CANDIDATES) ?? 500,
     mediaCandidateMultiplier:

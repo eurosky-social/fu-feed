@@ -18,6 +18,10 @@ export const rankingConfig = (
   itemBranchingPower: 1,
   coraterDecay: 0,
   seedRecencyMinWeight: 0.1,
+  // the in-graph popularity penalty is off here so a test's expected scores
+  // depend only on the graph structure it builds; the tests that exercise it
+  // opt in via overrides.
+  candidateDegreePenalty: 0,
   minEligibleRaters: 1,
   maxCandidates: 1500,
   mediaCandidateMultiplier: 16,

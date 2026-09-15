@@ -178,6 +178,15 @@ export type RankingConfig = {
   // seed weighting: most-recent like gets this weight, oldest gets 1.0, linearly
   // scaled — reduces over-reactivity to the latest likes
   seedRecencyMinWeight: number
+  // Penalty on how many likers a *candidate* already has inside the graph
+  // window, applied at candidate SELECTION: raw /= log2(likers + 2)^penalty.
+  // Two curators co-liking a post is weak evidence when the post is already
+  // viral — they may simply both have seen it. Counteracts that pull toward
+  // whatever is globally popular, so niche posts survive the top-N cut.
+  // Logarithmic, so it shades broad-appeal posts down rather than banning
+  // them. 0 = off. Distinct from popularityPenalty, which acts later on the
+  // AppView's global like count (see ranker/finalize.ts).
+  candidateDegreePenalty: number
   // a candidate needs at least this many distinct curators (0 = off)
   minEligibleRaters: number
   // how many top-scoring candidates to hydrate + finalize
