@@ -141,6 +141,11 @@ export type GraphConfig = {
   rebuildIntervalMs: number
   // max likers scanned per seed post during curator discovery (viral guard)
   seedLikerScanCap: number
+  // keep a like time on every reverse (post → liker) edge. Needed to tell who
+  // liked a seed post before the viewer did; costs 4 bytes per edge, so it is
+  // derived from whether that weighting is actually on (see src/index.ts) and
+  // not paid for when RankingConfig.lateLikerWeight is 1.
+  revTimestamps: boolean
   // hard ceiling on edge visits per request (pathological-viewer guard)
   maxEdgeVisits: number
 }
@@ -178,6 +183,13 @@ export type RankingConfig = {
   // seed weighting: most-recent like gets this weight, oldest gets 1.0, linearly
   // scaled — reduces over-reactivity to the latest likes
   seedRecencyMinWeight: number
+  // Curator weighting by *when* they liked the seed post relative to the viewer.
+  // Someone who liked it before the viewer found it independently — a tastemaker
+  // whose other likes are worth following. Someone who liked it after may simply
+  // have ridden the same wave of attention the viewer did. Likers at or after the
+  // viewer's own like keep this fraction of their credit: 1 = off (chronology
+  // ignored), 0 = they are dropped entirely.
+  lateLikerWeight: number
   // a candidate needs at least this many distinct curators (0 = off)
   minEligibleRaters: number
   // how many top-scoring candidates to hydrate + finalize

@@ -1,10 +1,10 @@
 import path from 'path'
 import { Database } from '../db'
 import { GraphConfig, RankingConfig } from '../config'
-import { ILikeGraph } from './types'
+import { ILikeGraph, SeedLike } from './types'
 import { ArenaInterner, isInternable } from './arena-interner'
 import { BuildWorkerInput } from './build-worker'
-import { CsrSnapshot, buildCsrSnapshot, toTsMin } from './csr-build'
+import { CsrSnapshot, buildCsrSnapshot, toTsMin, toTsSec } from './csr-build'
 
 // The like graph as Compressed-Sparse-Row typed arrays + arena interners (see
 // arena-interner.ts). More compact than the Map-based LikeGraph (no per-node
@@ -25,13 +25,16 @@ export class CsrLikeGraph implements ILikeGraph {
   private fwdTs = new Uint32Array(0)
   private revOff = new Uint32Array(1)
   private revUser = new Uint32Array(0)
+  // like time per reverse edge, aligned with revUser; empty unless
+  // GraphConfig.revTimestamps is on (see score()'s chronology weighting)
+  private revTs = new Uint32Array(0)
   private baseUsers = 0
   private basePosts = 0
 
   // live overlay (ids may be < baseUsers/Posts, i.e. base nodes with new edges,
   // or >= base counts, i.e. brand-new nodes since the last build)
   private deltaFwd = new Map<number, number[]>() // [post, tsMin, …] chronological
-  private deltaRev = new Map<number, number[]>() // [user, …]
+  private deltaRev = new Map<number, number[]>() // [user, tsSec, …]
   private pending: Array<[string, string, number]> | null = null
 
   constructor(
@@ -62,7 +65,7 @@ export class CsrLikeGraph implements ILikeGraph {
       dr = []
       this.deltaRev.set(p, dr)
     }
-    dr.push(u)
+    dr.push(u, toTsSec(createdAtMs))
     this.pending?.push([likerDid, subjectUri, createdAtMs])
   }
 
@@ -95,6 +98,7 @@ export class CsrLikeGraph implements ILikeGraph {
       this.fwdTs = snapshot.fwdTs
       this.revOff = snapshot.revOff
       this.revUser = snapshot.revUser
+      this.revTs = snapshot.revTs
       this.baseUsers = snapshot.users
       this.basePosts = snapshot.posts
       this.deltaFwd = new Map()
@@ -118,7 +122,7 @@ export class CsrLikeGraph implements ILikeGraph {
             dr = []
             this.deltaRev.set(p, dr)
           }
-          dr.push(u)
+          dr.push(u, toTsSec(ms))
           replayed++
         }
       }
@@ -204,18 +208,18 @@ export class CsrLikeGraph implements ILikeGraph {
 
   score(
     viewerDid: string,
-    seedUris: string[],
+    seed: SeedLike[],
     r: RankingConfig,
     candidateLimit = r.maxCandidates,
   ): Map<string, number> {
     const out = new Map<string, number>()
-    const n = seedUris.length
+    const n = seed.length
     if (n === 0 || !this.ready) return out
     const viewerInt = this.userI.get(viewerDid)
 
     const seedPostInts = new Set<number>()
-    for (const uri of seedUris) {
-      const p = this.postI.get(uri)
+    for (const s of seed) {
+      const p = this.postI.get(s.uri)
       if (p !== undefined) seedPostInts.add(p)
     }
     // also exclude every post the viewer has liked in-graph (base CSR slice +
@@ -234,16 +238,28 @@ export class CsrLikeGraph implements ILikeGraph {
     let visits = 0
     const budget = this.cfg.maxEdgeVisits
     const minW = r.seedRecencyMinWeight
+    // Weight a curator by whether they got to the seed post before the viewer.
+    // Needs a like time per reverse edge, which the base CSR only carries when
+    // GraphConfig.revTimestamps is on; without it every liker counts as early.
+    // Both sides of the comparison are in SECONDS (revTs / deltaRev / seedTs):
+    // minute granularity let a bot reacting within the same minute as the
+    // viewer's like count as "early" and slip past lateLikerWeight.
+    const lateW = r.lateLikerWeight
+    const chronologyOn = lateW !== 1 && this.revTs.length > 0
 
     // 1–2. curators + incoming weight
     const incoming = new Map<number, number>()
     for (let idx = 0; idx < n; idx++) {
-      const p = this.postI.get(seedUris[idx])
+      const p = this.postI.get(seed[idx].uri)
       if (p === undefined) continue
       const deg = this.revDegree(p)
       if (deg === 0) continue
       const w = n === 1 ? 1 : minW + (1 - minW) * (idx / (n - 1))
       const contrib = w / Math.pow(deg, r.itemBranchingPower)
+      const lateContrib = contrib * lateW
+      // the viewer's own like time on this seed post; a liker at or after it is
+      // late. An unusable timestamp leaves everyone early rather than guessing.
+      const seedTs = chronologyOn ? seedTsMin(seed[idx].likedAtMs) : 0
       let scanned = 0
       const cap = this.cfg.seedLikerScanCap
       // base likers
@@ -251,17 +267,22 @@ export class CsrLikeGraph implements ILikeGraph {
         const end = this.revOff[p + 1]
         for (let i = this.revOff[p]; i < end && scanned < cap; i++) {
           const u = this.revUser[i]
-          incoming.set(u, (incoming.get(u) ?? 0) + contrib)
           scanned++
+          const c =
+            chronologyOn && this.revTs[i] >= seedTs ? lateContrib : contrib
+          if (c === 0) continue // lateLikerWeight 0 → late likers are dropped
+          incoming.set(u, (incoming.get(u) ?? 0) + c)
         }
       }
-      // delta likers
+      // delta likers ([user, tsSec] pairs)
       const dr = this.deltaRev.get(p)
       if (dr) {
-        for (let k = 0; k < dr.length && scanned < cap; k++) {
+        for (let k = 0; k < dr.length && scanned < cap; k += 2) {
           const u = dr[k]
-          incoming.set(u, (incoming.get(u) ?? 0) + contrib)
           scanned++
+          const c = chronologyOn && dr[k + 1] >= seedTs ? lateContrib : contrib
+          if (c === 0) continue
+          incoming.set(u, (incoming.get(u) ?? 0) + c)
         }
       }
       visits += scanned
@@ -385,11 +406,19 @@ export class CsrLikeGraph implements ILikeGraph {
   }
 
   // distinct-liker count for a post = base reverse-slice length + delta likers
+  // (the delta holds [user, tsSec] pairs)
   private revDegree(p: number): number {
     const base = p < this.basePosts ? this.revOff[p + 1] - this.revOff[p] : 0
-    return base + (this.deltaRev.get(p)?.length ?? 0)
+    return base + (this.deltaRev.get(p)?.length ?? 0) / 2
   }
 }
+
+// The viewer's like time on a seed post, in the graph's tsSec encoding, so it
+// compares against reverse-edge times that are also in seconds (see toTsSec).
+// Infinity for an unusable timestamp, which makes every liker compare as early
+// and so leaves that seed post unweighted rather than mis-weighted.
+const seedTsMin = (likedAtMs: number): number =>
+  Number.isFinite(likedAtMs) ? toTsSec(likedAtMs) : Number.POSITIVE_INFINITY
 
 // Slices at or below this length use insertion sort; longer ones use an index
 // sort, so a heavily-backfilled high-degree user can't hit insertion sort's

@@ -14,6 +14,13 @@ export type CsrSnapshot = {
   fwdTs: Uint32Array
   revOff: Uint32Array
   revUser: Uint32Array
+  // like time of each reverse edge in SECONDS (see toTsSec), aligned with
+  // revUser. Empty when GraphConfig.revTimestamps is off — nothing reads it
+  // then, and at prod edge counts those 4 bytes/edge are worth not paying for.
+  // Seconds, not minutes, because score() splits likers into before/after the
+  // viewer's own like; minute granularity let a same-minute reactor count as
+  // "early" and slip past lateLikerWeight.
+  revTs: Uint32Array
   users: number
   posts: number
   edges: number
@@ -28,6 +35,7 @@ export const csrSnapshotBuffers = (snap: CsrSnapshot): ArrayBuffer[] => [
   snap.fwdTs.buffer as ArrayBuffer,
   snap.revOff.buffer as ArrayBuffer,
   snap.revUser.buffer as ArrayBuffer,
+  snap.revTs.buffer as ArrayBuffer,
 ]
 
 export const EPOCH_MS = Date.UTC(2020, 0, 1)
@@ -37,6 +45,17 @@ export const toTsMin = (ms: number): number => {
   const clamped = ms > cap ? cap : ms
   const m = Math.floor((clamped - EPOCH_MS) / 60000)
   return m > 0 ? m : 0
+}
+// Seconds since EPOCH_MS, clamped like toTsMin. Used only for the reverse-edge
+// chronology comparison in score() (lateLikerWeight): minute granularity let a
+// bot reacting within the same minute as the viewer's like count as "early",
+// so the liker side of the before/after split carries seconds. Uint32 holds
+// ~136 years of seconds from 2020, so this still fits the 4 bytes/edge budget.
+export const toTsSec = (ms: number): number => {
+  const cap = Date.now() + FUTURE_SKEW_MS
+  const clamped = ms > cap ? cap : ms
+  const s = Math.floor((clamped - EPOCH_MS) / 1000)
+  return s > 0 ? s : 0
 }
 const BUILD_PAGE = 100000
 
@@ -81,6 +100,9 @@ export const buildCsrSnapshot = async (
     let edgeU = new Uint32Array(approxE)
     let edgePost = new Uint32Array(approxE)
     let edgeTs = new Uint32Array(approxE)
+    // reverse-edge like time in seconds (see toTsSec); only populated when
+    // revTimestamps is on, but allocated unconditionally for a single grow path.
+    let edgeRevTs = new Uint32Array(approxE)
     let fwdDeg = new Uint32Array(1 << 20)
     let revDeg = new Uint32Array(1 << 21)
     let E = 0
@@ -130,10 +152,12 @@ export const buildCsrSnapshot = async (
           edgeU = growU32(edgeU, E + 1)
           edgePost = growU32(edgePost, E + 1)
           edgeTs = growU32(edgeTs, E + 1)
+          edgeRevTs = growU32(edgeRevTs, E + 1)
         }
         edgeU[E] = u
         edgePost[E] = p
         edgeTs[E] = toTsMin(ms)
+        edgeRevTs[E] = toTsSec(ms)
         E++
         if (u >= fwdDeg.length) fwdDeg = growU32(fwdDeg, u + 1)
         if (p >= revDeg.length) revDeg = growU32(revDeg, p + 1)
@@ -169,6 +193,8 @@ export const buildCsrSnapshot = async (
     const fwdPost = new Uint32Array(E)
     const fwdTs = new Uint32Array(E)
     const revUser = new Uint32Array(E)
+    const keepRevTs = cfg.revTimestamps
+    const revTs = new Uint32Array(keepRevTs ? E : 0)
     const fwdCur = fwdOff.slice(0, U) // mutable write cursors
     const revCur = revOff.slice(0, P)
     for (let i = 0; i < E; i++) {
@@ -177,7 +203,9 @@ export const buildCsrSnapshot = async (
       fwdPost[fc] = edgePost[i]
       fwdTs[fc] = edgeTs[i]
       const p = edgePost[i]
-      revUser[revCur[p]++] = u
+      const rc = revCur[p]++
+      revUser[rc] = u
+      if (keepRevTs) revTs[rc] = edgeRevTs[i]
     }
 
     // The scatter above is a stable counting sort, so each user's slice
@@ -198,6 +226,7 @@ export const buildCsrSnapshot = async (
     fwdTs,
     revOff,
     revUser,
+    revTs,
     users: U,
     posts: P,
     edges: E,

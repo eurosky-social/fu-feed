@@ -1,4 +1,5 @@
 import { AppContext } from '../config'
+import { SeedLike } from '../graph/types'
 import { Ranker, ContentFilter } from './types'
 import { finalize } from './finalize'
 
@@ -18,21 +19,28 @@ export class GraphRanker implements Ranker {
 
     const seedRows = await ctx.db
       .selectFrom('likes')
-      .select('subject_uri')
+      .select(['subject_uri', 'created_at'])
       .where('liker_did', '=', viewerDid)
       .orderBy('created_at', 'desc')
       .limit(cfg.seedLimit)
       .execute()
 
+    // Carry each seed's like time along with its URI: the graph weights a
+    // curator by whether they liked that post before or after the viewer did
+    // (RankingConfig.lateLikerWeight). Epoch ms, converted by whichever layout
+    // receives it.
     const seen = new Set<string>()
-    const seedUris: string[] = []
+    const seedItems: SeedLike[] = []
     for (const r of seedRows) {
       if (!seen.has(r.subject_uri)) {
         seen.add(r.subject_uri)
-        seedUris.push(r.subject_uri)
+        seedItems.push({
+          uri: r.subject_uri,
+          likedAtMs: Date.parse(r.created_at),
+        })
       }
     }
-    if (seedUris.length === 0) {
+    if (seedItems.length === 0) {
       console.log(`[foryou] viewer=${viewerDid} seed=0 → no personalization (will fall back)`)
       return []
     }
@@ -42,7 +50,7 @@ export class GraphRanker implements Ranker {
       content === 'all'
         ? cfg.maxCandidates
         : cfg.maxCandidates * cfg.mediaCandidateMultiplier
-    const raw = graph.score(viewerDid, seedUris, cfg, candidateLimit)
+    const raw = graph.score(viewerDid, seedItems, cfg, candidateLimit)
 
     // Authoritative already-liked exclusion: drop every post the viewer has
     // liked recently (from Postgres — covers likes beyond the capped seed and

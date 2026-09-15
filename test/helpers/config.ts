@@ -18,6 +18,10 @@ export const rankingConfig = (
   itemBranchingPower: 1,
   coraterDecay: 0,
   seedRecencyMinWeight: 0.1,
+  // chronology weighting is off here for the same reason: a test's expected
+  // scores should depend only on the graph structure it builds. The tests that
+  // exercise it opt in via overrides.
+  lateLikerWeight: 1,
   minEligibleRaters: 1,
   maxCandidates: 1500,
   mediaCandidateMultiplier: 16,
@@ -42,6 +46,7 @@ export const graphConfig = (overrides: Partial<GraphConfig> = {}): GraphConfig =
   windowHours: 24 * 365,
   rebuildIntervalMs: 2 * 60 * 60 * 1000,
   seedLikerScanCap: 10000,
+  revTimestamps: true,
   maxEdgeVisits: 1_000_000,
   ...overrides,
 })

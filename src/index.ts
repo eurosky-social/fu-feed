@@ -50,6 +50,7 @@ const run = async () => {
     coraterDecay: maybeFloat(process.env.FEEDGEN_CORATER_DECAY) ?? 0,
     seedRecencyMinWeight:
       maybeFloat(process.env.FEEDGEN_SEED_RECENCY_MIN_WEIGHT) ?? 0.1,
+    lateLikerWeight: maybeFloat(process.env.FEEDGEN_LATE_LIKER_WEIGHT) ?? 0.3,
     minEligibleRaters: maybeInt(process.env.FEEDGEN_MIN_ELIGIBLE_RATERS) ?? 0,
     maxCandidates: maybeInt(process.env.FEEDGEN_MAX_CANDIDATES) ?? 500,
     mediaCandidateMultiplier:
@@ -109,6 +110,10 @@ const run = async () => {
         maybeInt(process.env.FEEDGEN_GRAPH_REBUILD_INTERVAL_MS) ?? 2 * 60 * 60 * 1000,
       seedLikerScanCap:
         maybeInt(process.env.FEEDGEN_GRAPH_SEED_LIKER_SCAN_CAP) ?? 20000,
+      // Reverse-edge like times are only read by the early/late-liker weighting,
+      // and they cost 4 bytes per edge — so carry them exactly when that
+      // weighting does something.
+      revTimestamps: ranking.lateLikerWeight !== 1,
       maxEdgeVisits:
         maybeInt(process.env.FEEDGEN_GRAPH_MAX_EDGE_VISITS) ?? 3000000,
     },
