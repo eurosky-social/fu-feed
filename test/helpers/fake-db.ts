@@ -13,6 +13,7 @@ import { AppContext, FollowsConfig, RankingConfig } from '../../src/config'
 import { Database } from '../../src/db'
 import { DatabaseSchema } from '../../src/db/schema'
 import { RecentAuthorIndex } from '../../src/graph/recent-author-index'
+import { ILikeGraph } from '../../src/graph/types'
 import { followsConfig, rankingConfig } from './config'
 
 export type QueryHandler = (query: CompiledQuery) => unknown[]
@@ -161,6 +162,9 @@ export const makeContext = (opts: {
   follows?: Partial<FollowsConfig>
   pickerDid?: string
   authorIndex?: RecentAuthorIndex
+  // In-memory like graph. Supplying one selects the graph ranker for the
+  // collaborative-filter feeds, as FEEDGEN_RANKER does in production.
+  graph?: ILikeGraph
   // When set, getPosts throws the way @atproto/xrpc does when the AppView's
   // response fails lexicon validation: the parsed body rides on the error.
   appviewInvalidResponse?: boolean
@@ -229,10 +233,14 @@ export const makeContext = (opts: {
     didResolver: {} as never,
     publicAgent,
     authorIndex: opts.authorIndex,
+    graph: opts.graph,
     cfg: {
       ranking: rankingConfig(opts.ranking),
       follows: followsConfig(opts.follows),
       pickerDid: opts.pickerDid,
+      rankerEngine: opts.graph ? 'graph' : 'postgres',
+      // Off: densifying co-likers calls the real AppView.
+      colikerBackfill: { enabled: false, seedPosts: 0, maxPages: 0 },
     },
   } as unknown as AppContext
 

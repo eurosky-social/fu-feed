@@ -59,8 +59,20 @@ export class GraphRanker implements Ranker {
       .execute()
     for (const row of liked) raw.delete(row.subject_uri)
 
-    return raw.size === 0
-      ? []
-      : finalize(ctx, raw, { applyPopularityPenalty: true, content, viewerDid })
+    const ranked =
+      raw.size === 0
+        ? []
+        : await finalize(ctx, raw, {
+            applyPopularityPenalty: true,
+            content,
+            viewerDid,
+          })
+    // One line per computed list: a thin result is otherwise invisible, because
+    // the handler quietly tops it up (or falls back) with popular posts.
+    console.log(
+      `[foryou] viewer=${viewerDid} content=${content} seed=${seedUris.length} ` +
+        `candidates=${raw.size} → ${ranked.length} personalized`,
+    )
+    return ranked
   }
 }

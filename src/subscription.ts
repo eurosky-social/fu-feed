@@ -3,6 +3,7 @@ import { JetstreamSubscriptionBase, JetstreamEvent } from './jetstream'
 import { ILikeGraph } from './graph/types'
 import { RecentAuthorIndex } from './graph/recent-author-index'
 import { isInternable } from './graph/arena-interner'
+import { hubPostPrefix } from './graph/hub-likes'
 
 export const LIKE_COLLECTION = 'app.bsky.feed.like'
 export const REPOST_COLLECTION = 'app.bsky.feed.repost'
@@ -227,7 +228,8 @@ export class RepostsIngester extends JetstreamSubscriptionBase {
 // exempt when `pickerDid` is set: those posts are meant to be permanent hubs
 // connecting interest-aligned users, so sweeping their edges after retention
 // would silently sever a user who picked an interest long ago from newer
-// onboarders who pick the same one.
+// onboarders who pick the same one. Keeping them here is only half of it: the
+// in-memory graph must load them past its own window too (graph/hub-likes.ts).
 export const startRetentionSweep = (
   db: Database,
   retentionHours: number,
@@ -269,7 +271,7 @@ export const startRetentionSweep = (
         likesToDelete = likesToDelete.where(
           'subject_uri',
           'not like',
-          `at://${pickerDid}${POST_PATH}%`,
+          `${hubPostPrefix(pickerDid)}%`,
         )
       }
       const likes = await likesToDelete.executeTakeFirst()

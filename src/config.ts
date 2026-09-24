@@ -41,9 +41,9 @@ export type Config = {
   serviceDid: string
   publisherDid: string
   // DID of the "picker" account that hosts the onboarding interest posts. Likes
-  // on its posts are exempt from the retention sweep so those posts stay durable
-  // hubs connecting interest-aligned users (see startRetentionSweep). Unset
-  // disables the exemption.
+  // on its posts are exempt from the retention sweep and from the in-memory
+  // graph's window, so those posts stay durable hubs connecting interest-aligned
+  // users (see startRetentionSweep, graph/hub-likes.ts). Unset disables both.
   pickerDid?: string
   // Postgres connection string (pg-style URL).
   databaseUrl: string
@@ -137,6 +137,10 @@ export type GraphConfig = {
   layout: 'arrays' | 'csr'
   // hours of like history held in RAM (≤ Postgres retentionHours)
   windowHours: number
+  // the picker account (Config.pickerDid): likes on its interest posts are
+  // loaded whatever their age, so the window cannot sever the onboarding hubs.
+  // Repeated here because the build runs in a worker that only sees this config.
+  pickerDid?: string
   // periodic full rebuild from Postgres — refreshes + applies retention/deletes
   rebuildIntervalMs: number
   // max likers scanned per seed post during curator discovery (viral guard)
@@ -203,6 +207,13 @@ export type RankingConfig = {
   hydrationDeadlineMs: number
   // maximum length of the ranked list cached per viewer
   maxFeedSize: number
+  // Floor for the collaborative-filter feeds: a personalized list shorter than
+  // this is filled up to it with the cold-start popularity feed, so a viewer
+  // with a thin graph (typically one who has just onboarded) gets a feed that
+  // is theirs first and never runs out after a handful of posts. The follows
+  // feed is exempt — it would be filled with strangers. 0 disables the fill.
+  // Env: FEEDGEN_MIN_FEED_SIZE.
+  minFeedSize: number
   // include reply posts? Default false — top-level posts only
   includeReplies: boolean
   // diversification: max posts from a single author in the final list

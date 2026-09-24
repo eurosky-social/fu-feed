@@ -27,6 +27,7 @@ const run = async () => {
   const hostname = maybeStr(process.env.FEEDGEN_HOSTNAME) ?? 'example.com'
   const serviceDid =
     maybeStr(process.env.FEEDGEN_SERVICE_DID) ?? `did:web:${hostname}`
+  const pickerDid = maybeStr(process.env.FEEDGEN_PICKER_DID)
 
   const ranking: RankingConfig = {
     seedLimit: maybeInt(process.env.FEEDGEN_SEED_LIMIT) ?? 400,
@@ -57,6 +58,7 @@ const run = async () => {
     mediaUnknownHydrationLimit:
       maybeInt(process.env.FEEDGEN_MEDIA_UNKNOWN_HYDRATION_LIMIT) ?? 1500,
     maxFeedSize: maybeInt(process.env.FEEDGEN_MAX_FEED_SIZE) ?? 1000,
+    minFeedSize: maybeInt(process.env.FEEDGEN_MIN_FEED_SIZE) ?? 200,
     includeReplies: process.env.FEEDGEN_INCLUDE_REPLIES === 'true',
     perAuthorCap: maybeInt(process.env.FEEDGEN_PER_AUTHOR_CAP) ?? 3,
     authorMinGap: maybeInt(process.env.FEEDGEN_AUTHOR_MIN_GAP) ?? 3,
@@ -94,7 +96,7 @@ const run = async () => {
       'https://public.api.bsky.app',
     publisherDid:
       maybeStr(process.env.FEEDGEN_PUBLISHER_DID) ?? 'did:example:alice',
-    pickerDid: maybeStr(process.env.FEEDGEN_PICKER_DID),
+    pickerDid,
     subscriptionReconnectDelay:
       maybeInt(process.env.FEEDGEN_SUBSCRIPTION_RECONNECT_DELAY) ?? 3000,
     rankerEngine:
@@ -105,6 +107,7 @@ const run = async () => {
       windowHours:
         maybeInt(process.env.FEEDGEN_GRAPH_WINDOW_HOURS) ??
         (maybeInt(process.env.FEEDGEN_RETENTION_HOURS) ?? 72),
+      pickerDid,
       rebuildIntervalMs:
         maybeInt(process.env.FEEDGEN_GRAPH_REBUILD_INTERVAL_MS) ?? 2 * 60 * 60 * 1000,
       seedLikerScanCap:

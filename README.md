@@ -27,6 +27,11 @@ no language always pass, so the feed narrows toward the viewer's languages witho
 viewers share one cached list, so they stay global (a per-request header there would poison the shared
 list). Every ranking parameter is env-overridable — see [.env.example](.env.example).
 
+A personalized list shorter than `FEEDGEN_MIN_FEED_SIZE` (default 200) is filled up to it with that
+same cold-start feed, personalized posts first. An account that has only just onboarded, with a
+handful of likes, gets its few personalized posts and then something to scroll into, rather than a
+feed that ends after one to five posts. The follows feed is never filled: it would show strangers.
+
 ## Architecture
 
 ```
@@ -77,7 +82,11 @@ backfill instead (`com.atproto.sync.listRepos` → per-repo like records).
 
 The in-memory graph has two interchangeable layouts (`FEEDGEN_GRAPH_LAYOUT`): `csr` (typed-array
 compressed-sparse-row + arena interners; compact, supports large retention windows) and `arrays`
-(Map-based; simpler). `FEEDGEN_GRAPH_WINDOW_HOURS` controls how much history is held in RAM.
+(Map-based; simpler). `FEEDGEN_GRAPH_WINDOW_HOURS` controls how much history is held in RAM, with
+one exception: likes on the onboarding interest posts — the posts on the `FEEDGEN_PICKER_DID` account
+that the client likes for each interest a new user picks — are loaded whatever their age, just as the
+retention sweep never deletes them. They are a newcomer's only link to anyone else, and the older
+ones belong to the established accounts that still like things.
 
 ## Cold starts and the request budget
 

@@ -2,6 +2,7 @@ import { sql } from 'kysely'
 import { Database } from '../db'
 import { GraphConfig, RankingConfig } from '../config'
 import { ILikeGraph } from './types'
+import { hubPostPrefix, loadHubLikesBeyondWindow } from './hub-likes'
 
 const EPOCH_MS = Date.UTC(2020, 0, 1)
 const FUTURE_SKEW_MS = 5 * 60000 // clamp clock-skewed / spoofed createdAt to ~now
@@ -92,6 +93,9 @@ export class LikeGraph implements ILikeGraph {
       let lastUri = ''
       let first = true
       let edges = 0
+      // interest posts seen by the scan (see graph/hub-likes.ts)
+      const hubPrefix = this.cfg.pickerDid ? hubPostPrefix(this.cfg.pickerDid) : null
+      const hubUris = new Set<string>()
 
       // Keyset pagination ordered by (liker_did, created_at, uri) — uses the
       // existing (liker_did, created_at) index and delivers each user's likes
@@ -116,6 +120,9 @@ export class LikeGraph implements ILikeGraph {
         if (rows.length === 0) break
 
         for (const r of rows) {
+          if (hubPrefix && r.subject_uri.startsWith(hubPrefix)) {
+            hubUris.add(r.subject_uri)
+          }
           const ms = Date.parse(r.created_at)
           if (isNaN(ms)) continue
           const u = internUser(userId, fwd, r.liker_did)
@@ -133,6 +140,29 @@ export class LikeGraph implements ILikeGraph {
         if (rows.length < BUILD_PAGE) break
         // yield to the event loop so the build never blocks request serving
         await new Promise((res) => setImmediate(res))
+      }
+
+      // Likes on those interest posts from beyond the window. They append after
+      // the chronological rows, and score() stops at the first like older than
+      // the candidate window, so every slice they touch is re-sorted.
+      if (hubUris.size > 0) {
+        const hubRows = await loadHubLikesBeyondWindow(db, hubUris, windowCutoff)
+        const touched = new Set<number>()
+        for (const r of hubRows) {
+          const ms = Date.parse(r.created_at)
+          if (isNaN(ms)) continue
+          const u = internUser(userId, fwd, r.liker_did)
+          const p = internPost(postId, postUri, rev, r.subject_uri)
+          fwd[u].push(p, toTsMin(ms))
+          rev[p].push(u)
+          touched.add(u)
+          edges++
+        }
+        for (const u of touched) fwd[u] = sortPairsByTs(fwd[u])
+        console.log(
+          `🧠 like-graph kept ${hubRows.length} likes on ${hubUris.size} ` +
+            `interest posts from beyond the window`,
+        )
       }
 
       // atomic swap (single-threaded → no torn reads)
@@ -345,4 +375,14 @@ const internPost = (
     rev[id] = []
   }
   return id
+}
+
+// [post, ts, post, ts, …] reordered by ascending ts, pairs kept together.
+const sortPairsByTs = (arr: number[]): number[] => {
+  const order: number[] = []
+  for (let i = 0; i < arr.length; i += 2) order.push(i)
+  order.sort((a, b) => arr[a + 1] - arr[b + 1])
+  const out: number[] = []
+  for (const i of order) out.push(arr[i], arr[i + 1])
+  return out
 }
