@@ -23,6 +23,8 @@ export const rankingConfig = (
   mediaCandidateMultiplier: 16,
   mediaUnknownHydrationLimit: 1500,
   maxFeedSize: 300,
+  // off, so a test sees exactly what the ranker returned; fill tests set it
+  minFeedSize: 0,
   includeReplies: false,
   perAuthorCap: 2,
   authorMinGap: 5,

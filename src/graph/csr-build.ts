@@ -2,6 +2,7 @@ import { sql } from 'kysely'
 import { Database } from '../db'
 import { GraphConfig } from '../config'
 import { ArenaInterner, ArenaInternerSnapshot, isInternable } from './arena-interner'
+import { hubPostPrefix, loadHubLikesBeyondWindow } from './hub-likes'
 
 // A finished CSR base, in a form that can cross a worker-thread boundary: every
 // field is a typed array or a scalar, so `postMessage` moves the buffers instead
@@ -89,6 +90,34 @@ export const buildCsrSnapshot = async (
     let first = true
     let nextLog = 1000000
 
+    const addEdge = (likerDid: string, subjectUri: string, createdAt: string) => {
+      const ms = Date.parse(createdAt)
+      if (isNaN(ms)) return
+      if (!isInternable(subjectUri)) return // skip malformed URIs
+      const u = userI.intern(likerDid)
+      const p = postI.intern(subjectUri)
+      if (E >= edgeU.length) {
+        edgeU = growU32(edgeU, E + 1)
+        edgePost = growU32(edgePost, E + 1)
+        edgeTs = growU32(edgeTs, E + 1)
+      }
+      edgeU[E] = u
+      edgePost[E] = p
+      edgeTs[E] = toTsMin(ms)
+      E++
+      if (u >= fwdDeg.length) fwdDeg = growU32(fwdDeg, u + 1)
+      if (p >= revDeg.length) revDeg = growU32(revDeg, p + 1)
+      fwdDeg[u]++
+      revDeg[p]++
+    }
+
+    // Interest posts are found by the scan itself: anyone onboarding onto one
+    // likes it, so every hub still in use has a like inside the window. A hub
+    // nobody picked for a whole window drops out until its next like, which
+    // brings its full history back at the following rebuild.
+    const hubPrefix = cfg.pickerDid ? hubPostPrefix(cfg.pickerDid) : null
+    const hubUris = new Set<string>()
+
     // Page in indexed_at order, NOT liker_did order. `likes` is physically
     // laid out in ingest order (measured on prod: correlation 0.999 for
     // indexed_at vs 0.012 for liker_did), so paging by liker_did turned every
@@ -121,24 +150,10 @@ export const buildCsrSnapshot = async (
       if (rows.length === 0) break
 
       for (const r of rows) {
-        const ms = Date.parse(r.created_at)
-        if (isNaN(ms)) continue
-        if (!isInternable(r.subject_uri)) continue // skip malformed URIs
-        const u = userI.intern(r.liker_did)
-        const p = postI.intern(r.subject_uri)
-        if (E >= edgeU.length) {
-          edgeU = growU32(edgeU, E + 1)
-          edgePost = growU32(edgePost, E + 1)
-          edgeTs = growU32(edgeTs, E + 1)
+        if (hubPrefix && r.subject_uri.startsWith(hubPrefix)) {
+          hubUris.add(r.subject_uri)
         }
-        edgeU[E] = u
-        edgePost[E] = p
-        edgeTs[E] = toTsMin(ms)
-        E++
-        if (u >= fwdDeg.length) fwdDeg = growU32(fwdDeg, u + 1)
-        if (p >= revDeg.length) revDeg = growU32(revDeg, p + 1)
-        fwdDeg[u]++
-        revDeg[p]++
+        addEdge(r.liker_did, r.subject_uri, r.created_at)
       }
 
       if (E >= nextLog) {
@@ -155,6 +170,19 @@ export const buildCsrSnapshot = async (
       first = false
       if (rows.length < BUILD_PAGE) break
       await new Promise((res) => setImmediate(res))
+    }
+
+    // Everything the window scan skipped on those hubs. `<= windowCutoff` is the
+    // exact complement of the scan's lower bound, so no like is loaded twice.
+    // These land out of time order at the ends of their users' slices; the
+    // sortSlicesByTs pass below puts them back.
+    if (hubUris.size > 0) {
+      const hubRows = await loadHubLikesBeyondWindow(db, hubUris, windowCutoff)
+      for (const r of hubRows) addEdge(r.liker_did, r.subject_uri, r.created_at)
+      console.log(
+        `🧠 like-graph (csr) kept ${hubRows.length} likes on ${hubUris.size} ` +
+          `interest posts from beyond the window`,
+      )
     }
 
     const U = userI.count

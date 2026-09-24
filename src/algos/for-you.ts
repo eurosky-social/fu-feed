@@ -227,14 +227,44 @@ const computeRanked = async (
       err,
     )
   }
-  if (personalized.length > 0) return personalized
   // Bias the cold-start feed by the viewer's Accept-Language — but only for
   // authenticated viewers, whose ranked list is cached per-DID. Anonymous
   // viewers share one cache entry (viewerDid = null), so applying a per-request
   // header there would let one viewer's language poison every other viewer's
   // shared list; they stay global.
   const langs = viewerDid ? viewerLangs : []
-  return popularityRanker.rank(ctx, viewerDid, content, langs)
+  if (personalized.length === 0) {
+    return popularityRanker.rank(ctx, viewerDid, content, langs)
+  }
+
+  // A thin collaborative-filter list is filled up to minFeedSize with the
+  // cold-start feed rather than served alone. Without this a viewer who has
+  // just onboarded — whose only likes are a few interest posts — got a feed of
+  // one to five posts, while one with no personalized result at all got a full
+  // popularity feed: the less we knew, the better it looked. The personalized
+  // posts stay first; the fill is what they scroll into.
+  const floor = ctx.cfg.ranking.minFeedSize
+  if (feed.ranker !== 'cf' || personalized.length >= floor) return personalized
+  try {
+    const have = new Set(personalized.map(postUriOf))
+    const filler = (
+      await popularityRanker.rank(ctx, viewerDid, content, langs)
+    ).filter((e) => !have.has(postUriOf(e)))
+    const fill = filler.slice(0, floor - personalized.length)
+    console.log(
+      `[foryou] feed=${feed.rkey} viewer=${viewerDid} personalized=${personalized.length} ` +
+        `→ filled with ${fill.length} popular`,
+    )
+    return personalized.concat(fill)
+  } catch (err) {
+    // The fill is a bonus; losing it must not cost the viewer what was already
+    // personalized.
+    console.error(
+      `[foryou] popularity fill failed for viewer=${viewerDid}; serving the personalized list alone`,
+      err,
+    )
+    return personalized
+  }
 }
 
 // Awaits `p` but gives up after `ms`, resolving either way and never rejecting.
