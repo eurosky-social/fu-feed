@@ -47,6 +47,10 @@ export const handler = async (
   // in preference order; [] when the header is absent. Used only to bias the
   // cold-start feed (see computeRanked).
   viewerLangs: string[],
+  // When the request arrived (epoch ms). The AppView's clock starts there, not
+  // here: verifying the viewer's token can mean a DID lookup first, and that
+  // time is spent out of the same budget.
+  receivedAt: number = Date.now(),
 ) => {
   const cacheKey = rankedListKey(feed.rkey, viewerDid)
   const offset = parseCursor(params.cursor)
@@ -55,12 +59,13 @@ export const handler = async (
   if (!ranked) {
     // Compute detached, and wait only as long as we can afford to.
     //
-    // The AppView aborts a getFeedSkeleton call at 10 seconds and renders the
-    // timeout as "the feed server appears to be offline" — a the-feed-is-broken
-    // message, shown for a feed that is merely cold. A first load can genuinely
-    // approach that: the inline import is bounded separately from hydration,
-    // and if the ranker comes up empty the cold-start feed hydrates all over
-    // again, each stage honouring its own deadline with nothing capping the sum.
+    // The AppView gives up on a getFeedSkeleton call after about 4.7 seconds
+    // and renders that as "the feed server appears to be offline" — a
+    // the-feed-is-broken message, shown for a feed that is merely cold. A first
+    // load routinely runs past it: the inline import is bounded separately from
+    // hydration, and if the ranker comes up empty the cold-start feed hydrates
+    // all over again, each stage honouring its own deadline with nothing
+    // capping the sum.
     //
     // So losing this race means "answer now, keep working", never "abandon the
     // work": the computation runs on and caches, which is what makes telling
@@ -71,12 +76,12 @@ export const handler = async (
     void computing.catch(() => {})
     const withinBudget = await raceBudget(
       computing,
-      ctx.cfg.ranking.requestBudgetMs,
+      ctx.cfg.ranking.requestBudgetMs - (Date.now() - receivedAt),
     )
     if (!withinBudget) {
       console.log(
         `[foryou] feed=${feed.rkey} viewer=${viewerDid ?? 'anon'} still preparing after ` +
-          `${ctx.cfg.ranking.requestBudgetMs}ms; asking the client to retry`,
+          `${Date.now() - receivedAt}ms; asking the client to retry`,
       )
       throw feedPreparing()
     }

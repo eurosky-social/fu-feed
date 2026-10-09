@@ -64,6 +64,35 @@ describe('request budget', () => {
     assert.equal(err.payload.error, 'FeedPreparing')
   })
 
+  it('counts time spent before the handler against the budget', async () => {
+    const redis = makeFakeRedis()
+    const { ctx } = makeContext({
+      redis,
+      popularRows: popular,
+      appviewPosts: posts,
+      appviewDelayMs: 150,
+      ranking: { requestBudgetMs: 5000, perAuthorCap: 10, authorMinGap: 0 },
+    })
+
+    // Token verification already spent the whole budget, so this must answer
+    // at once rather than wait another five seconds the AppView won't give.
+    const started = Date.now()
+    const err = await handler(
+      ctx,
+      PARAMS,
+      null,
+      FEED,
+      [],
+      started - 5000,
+    ).then(
+      () => null,
+      (e) => e,
+    )
+    assert.ok(err, 'the handler should have thrown')
+    assert.equal(err.payload.error, 'FeedPreparing')
+    assert.ok(Date.now() - started < 1000, 'it should not have waited out a fresh budget')
+  })
+
   it('keeps computing after it gives up waiting, so the next pull is warm', async () => {
     const redis = makeFakeRedis()
     const { ctx } = makeContext({

@@ -224,12 +224,16 @@ export type RankingConfig = {
   authorMinGap: number
   // TTL of the cached per-viewer ranked list, in seconds
   cacheTtlSeconds: number
-  // Wall-clock budget for answering one getFeedSkeleton call on a cache miss.
-  // The AppView aborts the call at 10s and renders that as "feed unavailable" —
-  // a the-feed-is-broken message on a feed that is merely cold. This must stay
-  // comfortably below that: the per-stage deadlines (inline import + hydration,
-  // and hydration again if the ranker comes up empty and the cold-start feed
-  // takes over) can otherwise add up past it. See algos/for-you.ts.
+  // Wall-clock budget for answering one getFeedSkeleton call on a cache miss,
+  // counted from when the request arrived. The AppView gives up after about
+  // 4.7s and renders that as "feed unavailable" — a the-feed-is-broken message
+  // on a feed that is merely cold. (Not the 10s this was first sized against:
+  // 466 of 471 abandoned requests in 30h of production logs hung up at
+  // 4.6-4.7s, so a 7s budget never once got its answer back.) This must stay
+  // below that with room for the reply to travel back: the per-stage deadlines
+  // (inline import + hydration, and hydration again if the ranker comes up
+  // empty and the cold-start feed takes over) can otherwise add up past it.
+  // See algos/for-you.ts.
   requestBudgetMs: number
   // On a viewer's first request, how many of their most-recent likes to import
   // inline (a single listRecords page) so that first load can already be

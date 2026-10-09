@@ -63,8 +63,9 @@ const run = async () => {
     perAuthorCap: maybeInt(process.env.FEEDGEN_PER_AUTHOR_CAP) ?? 3,
     authorMinGap: maybeInt(process.env.FEEDGEN_AUTHOR_MIN_GAP) ?? 3,
     cacheTtlSeconds: maybeInt(process.env.FEEDGEN_CACHE_TTL_SECONDS) ?? 600,
-    // Comfortably under the AppView's 10s abort; see RankingConfig.
-    requestBudgetMs: maybeInt(process.env.FEEDGEN_REQUEST_BUDGET_MS) ?? 7000,
+    // Under the AppView's ~4.7s hang-up, with room for the reply to travel
+    // back; see RankingConfig.
+    requestBudgetMs: maybeInt(process.env.FEEDGEN_REQUEST_BUDGET_MS) ?? 4000,
     inlineBackfillLimit:
       maybeInt(process.env.FEEDGEN_INLINE_BACKFILL_LIMIT) ?? 100,
     inlineBackfillDeadlineMs:
