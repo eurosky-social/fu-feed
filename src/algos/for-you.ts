@@ -11,7 +11,9 @@ import {
   backfillSeedColikers,
 } from '../ranker/backfill'
 import { ensureFollowsSynced } from '../ranker/follows-backfill'
-import { postUriOf, toSkeletonPost } from './feed-entry'
+import { postUriOf, toSkeletonPost, withContext } from './feed-entry'
+import { ContextSource, feedContext } from './feed-context'
+import { readCachedMeta } from '../ranker/hydrate'
 import {
   cacheRankedList,
   recacheRankedList,
@@ -44,8 +46,9 @@ export const handler = async (
   viewerDid: string | null,
   feed: FeedDef,
   // Normalized primary language subtags from the viewer's Accept-Language,
-  // in preference order; [] when the header is absent. Used only to bias the
-  // cold-start feed (see computeRanked).
+  // in preference order; [] when the header is absent. Biases the cold-start
+  // feed, orders feeds with languageTiers, and marks each served post as in or
+  // out of the viewer's languages (see computeRanked).
   viewerLangs: string[],
   // When the request arrived (epoch ms). The AppView's clock starts there, not
   // here: verifying the viewer's token can mean a DID lookup first, and that
@@ -220,9 +223,26 @@ const computeRanked = async (
       : ctx.cfg.rankerEngine === 'graph'
         ? graphRanker
         : cfRanker
+  // The viewer's languages, for authenticated viewers only: their ranked list
+  // is cached per-DID, while anonymous viewers share one cache entry (viewerDid
+  // = null), so applying a per-request header there would let one viewer's
+  // language poison every other viewer's shared list; they stay global.
+  const langs = viewerDid ? viewerLangs : []
+  // A feed with language tiers orders by the viewer's languages and drops
+  // nothing for it, its cold-start list included. The others keep the original
+  // behaviour: a language-blind personalized list, and a cold-start list
+  // filtered to the viewer's languages.
+  const tiers = feed.languageTiers ? langs : []
+  const popularity = feed.languageTiers
+    ? { languageTiers: tiers }
+    : { languages: langs }
+  const source: ContextSource = feed.ranker === 'follows' ? 'follows' : 'cf'
+
   let personalized: string[] = []
   try {
-    personalized = await engine.rank(ctx, viewerDid, content)
+    personalized = await engine.rank(ctx, viewerDid, content, {
+      languageTiers: tiers,
+    })
   } catch (err) {
     // A personalization failure (ranker/redis/db hiccup) must never surface as a
     // feed error; degrade to the cold-start popularity feed below so the viewer
@@ -232,14 +252,14 @@ const computeRanked = async (
       err,
     )
   }
-  // Bias the cold-start feed by the viewer's Accept-Language — but only for
-  // authenticated viewers, whose ranked list is cached per-DID. Anonymous
-  // viewers share one cache entry (viewerDid = null), so applying a per-request
-  // header there would let one viewer's language poison every other viewer's
-  // shared list; they stay global.
-  const langs = viewerDid ? viewerLangs : []
   if (personalized.length === 0) {
-    return popularityRanker.rank(ctx, viewerDid, content, langs)
+    const popular = await popularityRanker.rank(
+      ctx,
+      viewerDid,
+      content,
+      popularity,
+    )
+    return (await withFeedContext(ctx, feed, langs, [], popular)).entries
   }
 
   // A thin collaborative-filter list is filled up to minFeedSize with the
@@ -249,27 +269,88 @@ const computeRanked = async (
   // popularity feed: the less we knew, the better it looked. The personalized
   // posts stay first; the fill is what they scroll into.
   const floor = ctx.cfg.ranking.minFeedSize
-  if (feed.ranker !== 'cf' || personalized.length >= floor) return personalized
-  try {
-    const have = new Set(personalized.map(postUriOf))
-    const filler = (
-      await popularityRanker.rank(ctx, viewerDid, content, langs)
-    ).filter((e) => !have.has(postUriOf(e)))
-    const fill = filler.slice(0, floor - personalized.length)
-    console.log(
-      `[foryou] feed=${feed.rkey} viewer=${viewerDid} personalized=${personalized.length} ` +
-        `→ filled with ${fill.length} popular`,
-    )
-    return personalized.concat(fill)
-  } catch (err) {
-    // The fill is a bonus; losing it must not cost the viewer what was already
-    // personalized.
-    console.error(
-      `[foryou] popularity fill failed for viewer=${viewerDid}; serving the personalized list alone`,
-      err,
-    )
-    return personalized
+  let fill: string[] = []
+  if (feed.ranker === 'cf' && personalized.length < floor) {
+    try {
+      const have = new Set(personalized.map(postUriOf))
+      const filler = (
+        await popularityRanker.rank(ctx, viewerDid, content, popularity)
+      ).filter((e) => !have.has(postUriOf(e)))
+      fill = filler.slice(0, floor - personalized.length)
+      console.log(
+        `[foryou] feed=${feed.rkey} viewer=${viewerDid} personalized=${personalized.length} ` +
+          `→ filled with ${fill.length} popular`,
+      )
+    } catch (err) {
+      // The fill is a bonus; losing it must not cost the viewer what was already
+      // personalized.
+      console.error(
+        `[foryou] popularity fill failed for viewer=${viewerDid}; serving the personalized list alone`,
+        err,
+      )
+    }
   }
+  const tagged = await withFeedContext(
+    ctx,
+    feed,
+    langs,
+    personalized,
+    fill,
+    source,
+  )
+  if (feed.languageTiers) {
+    // Whether the AppView forwards the client's languages at all is only
+    // observable here, so a language-ordered list always says what it got.
+    console.log(
+      `[foryou] feed=${feed.rkey} viewer=${viewerDid} langs=${langs.join(',') || 'none'} ` +
+        `→ ${personalized.length} personalized (${tagged.personalizedInLanguage} in-language) ` +
+        `+ ${fill.length} popular`,
+    )
+  }
+  return tagged.entries
+}
+
+// Attaches each entry's feed context: the personalized entries from `source`,
+// the popularity ones from 'popular'. When the viewer sent languages, each is
+// also marked as in or out of them, read from post_meta — every entry here was
+// just hydrated by finalize, so this is one local read and no AppView call.
+const withFeedContext = async (
+  ctx: AppContext,
+  feed: FeedDef,
+  langs: string[],
+  personalized: string[],
+  popular: string[],
+  source: ContextSource = 'cf',
+): Promise<{ entries: string[]; personalizedInLanguage: number }> => {
+  let inLanguage = (_entry: string): boolean | undefined => undefined
+  if (langs.length > 0) {
+    try {
+      const wanted = new Set(langs)
+      const metas = await readCachedMeta(
+        ctx,
+        [...personalized, ...popular].map(postUriOf),
+      )
+      inLanguage = (entry) =>
+        metas.get(postUriOf(entry))?.langs.some((l) => wanted.has(l)) ?? false
+    } catch (err) {
+      // The context is attribution, not content: serve the list without the
+      // language mark rather than fail it.
+      console.error(`[foryou] feed=${feed.rkey} language mark failed`, err)
+    }
+  }
+  let personalizedInLanguage = 0
+  const entries = personalized
+    .map((e) => {
+      const mark = inLanguage(e)
+      if (mark) personalizedInLanguage++
+      return withContext(e, feedContext(feed.rkey, source, mark))
+    })
+    .concat(
+      popular.map((e) =>
+        withContext(e, feedContext(feed.rkey, 'popular', inLanguage(e))),
+      ),
+    )
+  return { entries, personalizedInLanguage }
 }
 
 // Awaits `p` but gives up after `ms`, resolving either way and never rejecting.

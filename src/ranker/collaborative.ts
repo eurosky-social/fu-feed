@@ -1,6 +1,6 @@
 import { sql } from 'kysely'
 import { AppContext } from '../config'
-import { Ranker, ContentFilter } from './types'
+import { Ranker, ContentFilter, RankOptions } from './types'
 import { finalize } from './finalize'
 
 // Collaborative-filter ranker computed in Postgres (one CTE so the millions of
@@ -18,6 +18,7 @@ export class CollaborativeFilterRanker implements Ranker {
     ctx: AppContext,
     viewerDid: string | null,
     content: ContentFilter,
+    opts: RankOptions = {},
   ): Promise<string[]> {
     if (!viewerDid) return []
     const cfg = ctx.cfg.ranking
@@ -127,6 +128,7 @@ export class CollaborativeFilterRanker implements Ranker {
     return finalize(ctx, rawScores, {
       applyPopularityPenalty: true,
       content,
+      languageTiers: opts.languageTiers,
       viewerDid,
     })
   }

@@ -129,6 +129,38 @@ happen:
   reward signal for evaluating and tuning ranking parameters against real engagement. The signal is
   collected only; it does not yet feed back into ranking.
 
+Every served post carries a **`feedContext`** naming the feed and the path that put the post there
+([src/algos/feed-context.ts](src/algos/feed-context.ts)):
+
+```
+fu-vids-lang;src=cf;lang=1
+<rkey>;src=<cf|follows|popular>[;lang=<0|1>]
+```
+
+`src` is the collaborative filter, the follows ranking, or the popularity list (the whole feed for a
+viewer with no personalization, or the fill under a thin one). `lang` says whether the post declares one
+of the viewer's languages, and is present only when the request carried an `Accept-Language`. Clients
+hand the context back with every interaction, so all feeds can share one endpoint and still be told
+apart:
+
+- reward rows store it in `interactions.feed_context`;
+- `interaction_counts` totals every event per day and context, **`interactionSeen` included** — the
+  denominator that turns raw likes into likes per view, per feed and per path. A context the service
+  could not have issued is neither stored nor counted.
+
+```sql
+-- likes and "show less" per thousand views, per feed and path, last 7 days
+SELECT feed_context,
+       sum(n) FILTER (WHERE event LIKE '%#interactionSeen') AS views,
+       round(1000.0 * coalesce(sum(n) FILTER (WHERE event LIKE '%#interactionLike'), 0)
+             / NULLIF(sum(n) FILTER (WHERE event LIKE '%#interactionSeen'), 0), 1) AS likes_per_1k,
+       round(1000.0 * coalesce(sum(n) FILTER (WHERE event LIKE '%#requestLess'), 0)
+             / NULLIF(sum(n) FILTER (WHERE event LIKE '%#interactionSeen'), 0), 1) AS less_per_1k
+FROM interaction_counts
+WHERE day >= to_char(now() - interval '7 days', 'YYYY-MM-DD')
+GROUP BY feed_context ORDER BY feed_context;
+```
+
 ## Multiple feeds
 
 Content-typed variants (images, video) share the **one** in-memory graph — only a final content filter
@@ -138,6 +170,24 @@ differs, so additional feeds add negligible memory. Set `FEEDGEN_IMAGE_FEED_RKEY
 Because media is a fraction of all posts, content feeds **over-generate** candidates
 (`maxCandidates × FEEDGEN_MEDIA_CANDIDATE_MULTIPLIER`) before applying the media filter, so a photo or
 video feed isn't starved by a content-blind candidate cap.
+
+### Ordering by the viewer's languages
+
+`FEEDGEN_VIDEO_LANG_FEED_RKEY` publishes the video feed a second time, **ordered by the viewer's
+languages**: the `Accept-Language` the AppView forwards from the client's content-language setting.
+Posts that declare one of those languages come first, then everything else — other languages and posts
+that declare none — each tier in score order with the usual author spacing, and the per-author cap
+counted across both. Nothing is dropped for its language: for a small language the second tier is most
+of the feed, and the rest of the viewer's own personalized list is better filler than strangers'
+popular posts. A list that is still short is filled from the popularity list, ordered the same way.
+
+Anonymous requests share one cached list, so their languages are ignored; a viewer whose client sends
+none gets plain score order. The original feeds are unchanged — their personalized path stays
+language-blind and their cold-start list stays *filtered* to the viewer's languages.
+
+It is a separate feed so it can be compared with the language-blind one before replacing it: each logs
+`langs=… → N personalized (M in-language) + K popular` per computed list, and `interaction_counts`
+(see [Interactions](#interactions)) gives likes per view for both.
 
 ## The follows feed
 
