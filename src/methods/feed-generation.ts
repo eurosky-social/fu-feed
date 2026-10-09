@@ -8,6 +8,7 @@ import { AtUri } from '@atproto/syntax'
 
 export default function (server: Server, ctx: AppContext) {
   server.app.bsky.feed.getFeedSkeleton(async ({ params, req }) => {
+    const receivedAt = Date.now()
     const feedUri = new AtUri(params.feed)
     const feed = resolveFeed(ctx, feedUri.rkey)
     if (
@@ -36,7 +37,14 @@ export default function (server: Server, ctx: AppContext) {
     // no likes, so it seeds the cold-start feed's language bias.
     const viewerLangs = parseAcceptLanguage(req.headers['accept-language'])
 
-    const body = await handler(ctx, params, viewerDid, feed, viewerLangs)
+    const body = await handler(
+      ctx,
+      params,
+      viewerDid,
+      feed,
+      viewerLangs,
+      receivedAt,
+    )
     return {
       encoding: 'application/json',
       body,

@@ -90,16 +90,21 @@ ones belong to the established accounts that still like things.
 
 ## Cold starts and the request budget
 
-The AppView aborts a `getFeedSkeleton` call after **10 seconds** and renders the timeout as *"Hmm, the
-feed server appears to be offline. Please let the feed owner know about this issue."* — a
-the-feed-is-broken message, shown to a viewer whose feed is merely cold. A first load can genuinely
-approach that ceiling: the inline import of the viewer's likes or follows is bounded separately from
+The AppView gives up on a `getFeedSkeleton` call after about **4.7 seconds** and renders the timeout as
+*"Hmm, the feed server appears to be offline. Please let the feed owner know about this issue."* — a
+the-feed-is-broken message, shown to a viewer whose feed is merely cold. A first load routinely runs
+past that ceiling: the inline import of the viewer's likes or follows is bounded separately from
 hydration, and if the ranker comes up empty the cold-start feed hydrates all over again. Each stage
 honours its own deadline; nothing capped the sum.
 
-`FEEDGEN_REQUEST_BUDGET_MS` (default 7s) caps it. On a cache miss the computation is started
-**detached** and awaited only for the budget. If it lands in time it is served normally. If it does
-not, the computation *keeps running and caches its result*, and the request returns an XRPC error
+`FEEDGEN_REQUEST_BUDGET_MS` (default 4s) caps it, counted from when the request arrives — verifying
+the viewer's token can cost a DID lookup before any ranking starts, and the AppView's clock is already
+running. The budget was first sized against a 10-second ceiling at 7s; in production the AppView hung
+up at 4.6–4.7s every time, so that budget never once got its answer back to the client.
+
+On a cache miss the computation is started **detached** and awaited only for the budget. If it lands
+in time it is served normally. If it does not, the computation *keeps running and caches its
+result*, and the request returns an XRPC error
 carrying `Your feed is still being prepared. Pull to refresh in a few seconds.` — which is true,
 because the next pull hits the warm cache.
 
