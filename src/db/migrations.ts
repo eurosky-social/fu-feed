@@ -232,3 +232,37 @@ migrations['008'] = {
     await db.schema.dropIndex('reposts_subject_idx').execute()
   },
 }
+
+migrations['009'] = {
+  async up(db: Kysely<unknown>) {
+    // Which feed — and which path through it — a reward event belongs to. Every
+    // feed this service publishes reports to the same sendInteractions endpoint,
+    // so without it a like cannot be told apart by feed.
+    await db.schema
+      .alterTable('interactions')
+      .addColumn('feed_context', 'varchar')
+      .execute()
+
+    // Event totals per day and feed context, views included (see schema
+    // InteractionCount). A handful of rows per day; nothing sweeps it.
+    await db.schema
+      .createTable('interaction_counts')
+      .addColumn('day', 'varchar', (col) => col.notNull())
+      .addColumn('feed_context', 'varchar', (col) => col.notNull())
+      .addColumn('event', 'varchar', (col) => col.notNull())
+      .addColumn('n', 'integer', (col) => col.notNull())
+      .addPrimaryKeyConstraint('interaction_counts_pk', [
+        'day',
+        'feed_context',
+        'event',
+      ])
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('interaction_counts').execute()
+    await db.schema
+      .alterTable('interactions')
+      .dropColumn('feed_context')
+      .execute()
+  },
+}

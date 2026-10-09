@@ -17,6 +17,14 @@ export type FeedDef = {
   rkey: string
   ranker: FeedRanker
   content: ContentFilter
+  // Order results by the viewer's preferred languages (their Accept-Language,
+  // which the AppView forwards from the client's content-language setting):
+  // posts that declare one of those languages first, then everything else.
+  // Nothing is dropped for its language — the rest of the viewer's own
+  // personalized list is better filler than strangers' popular posts, and for a
+  // small language it is most of the feed. Unset leaves the personalized path
+  // language-blind, as the original feeds are.
+  languageTiers?: boolean
 }
 
 export type AppContext = {

@@ -5,6 +5,7 @@ export type DatabaseSchema = {
   follows: Follow
   seen: Seen
   interactions: Interaction
+  interaction_counts: InteractionCount
   sub_state: SubState
 }
 
@@ -102,6 +103,23 @@ export type Interaction = {
   weight: number
   // when we received it (ISO 8601)
   created_at: string
+  // the feed context the post was served with (see algos/feed-context.ts) —
+  // which feed, and which path through it, the engagement belongs to. null for
+  // rows recorded before contexts existed or reported without one.
+  feed_context: string | null
+}
+
+// Daily totals of interaction events per feed context, interactionSeen
+// included. The per-row table above keeps only reward events — storing every
+// view per viewer and post would dwarf it — so this is where the denominator
+// lives: likes per thousand views, per feed and per path through it.
+export type InteractionCount = {
+  // UTC date the events were received (YYYY-MM-DD)
+  day: string
+  feed_context: string
+  // the interaction event token (app.bsky.feed.defs#…)
+  event: string
+  n: number
 }
 
 export type SubState = {

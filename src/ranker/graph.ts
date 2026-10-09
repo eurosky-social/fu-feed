@@ -1,5 +1,5 @@
 import { AppContext } from '../config'
-import { Ranker, ContentFilter } from './types'
+import { Ranker, ContentFilter, RankOptions } from './types'
 import { finalize } from './finalize'
 
 // Ranker backed by the in-memory like graph. The seed (the viewer's recent
@@ -10,6 +10,7 @@ export class GraphRanker implements Ranker {
     ctx: AppContext,
     viewerDid: string | null,
     content: ContentFilter,
+    opts: RankOptions = {},
   ): Promise<string[]> {
     if (!viewerDid) return []
     const graph = ctx.graph
@@ -65,6 +66,7 @@ export class GraphRanker implements Ranker {
         : await finalize(ctx, raw, {
             applyPopularityPenalty: true,
             content,
+            languageTiers: opts.languageTiers,
             viewerDid,
           })
     // One line per computed list: a thin result is otherwise invisible, because

@@ -1,6 +1,6 @@
 import { sql } from 'kysely'
 import { AppContext } from '../config'
-import { Ranker, ContentFilter } from './types'
+import { Ranker, ContentFilter, RankOptions } from './types'
 import { finalize } from './finalize'
 
 type PopRow = { subject_uri: string; likes: number }
@@ -66,10 +66,19 @@ const refreshInBackground = (ctx: AppContext, content: ContentFilter): void => {
   )
 }
 
+// The popularity ranker's options: the shared ones, plus the cold-start
+// language allowlist.
+export type PopularityOptions = RankOptions & {
+  // When the viewer's Accept-Language yields a non-empty allowlist, the feed is
+  // biased toward those languages (see FinalizeOptions.languages); absent or []
+  // leaves it global.
+  languages?: string[]
+}
+
 // Cold-start ranker for anonymous viewers and users with no likes yet: the
-// most-liked recent posts, still subject to time-decay and freshness. When the
-// viewer's Accept-Language yields a non-empty `languages` allowlist, the feed is
-// biased toward those languages (see finalize); [] leaves it global.
+// most-liked recent posts, still subject to time-decay and freshness. Biased by
+// the viewer's languages — filtered by `languages`, or ordered by
+// `languageTiers` — when the caller supplies them.
 export class PopularityRanker implements Ranker {
   // Pre-compute the shared cold-start set (e.g. at server start) so the first
   // cold-start request after boot doesn't pay the query.
@@ -93,7 +102,7 @@ export class PopularityRanker implements Ranker {
     ctx: AppContext,
     viewerDid: string | null,
     content: ContentFilter,
-    languages: string[] = [],
+    opts: PopularityOptions = {},
   ): Promise<string[]> {
     const ttlMs = ctx.cfg.ranking.popularityCacheTtlSeconds * 1000
     const entry = popCache.get(content)
@@ -115,7 +124,8 @@ export class PopularityRanker implements Ranker {
     return finalize(ctx, rawScores, {
       applyPopularityPenalty: false,
       content,
-      languages,
+      languages: opts.languages,
+      languageTiers: opts.languageTiers,
       viewerDid,
     })
   }

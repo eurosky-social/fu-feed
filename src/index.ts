@@ -2,9 +2,9 @@ import dotenv from 'dotenv'
 import FeedGenerator from './server'
 import { RankingConfig, FeedDef } from './config'
 
-// The collaborative-filter feed plus optional image/video variants (all share
-// one graph), and the optional follows feed (its own index — see
-// graph/recent-author-index.ts).
+// The collaborative-filter feed plus optional image/video variants and a
+// language-ordered video variant (all share one graph), and the optional
+// follows feed (its own index — see graph/recent-author-index.ts).
 const buildFeeds = (): FeedDef[] => {
   const feeds: FeedDef[] = [
     {
@@ -17,6 +17,17 @@ const buildFeeds = (): FeedDef[] => {
   if (image) feeds.push({ rkey: image, ranker: 'cf', content: 'image' })
   const video = maybeStr(process.env.FEEDGEN_VIDEO_FEED_RKEY)
   if (video) feeds.push({ rkey: video, ranker: 'cf', content: 'video' })
+  // The video feed again, ordered by the viewer's languages. Separate so it can
+  // be tried against the language-blind one before replacing it.
+  const videoByLanguage = maybeStr(process.env.FEEDGEN_VIDEO_LANG_FEED_RKEY)
+  if (videoByLanguage) {
+    feeds.push({
+      rkey: videoByLanguage,
+      ranker: 'cf',
+      content: 'video',
+      languageTiers: true,
+    })
+  }
   const follows = maybeStr(process.env.FEEDGEN_FOLLOWS_FEED_RKEY)
   if (follows) feeds.push({ rkey: follows, ranker: 'follows', content: 'all' })
   return feeds

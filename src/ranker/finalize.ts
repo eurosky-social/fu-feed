@@ -13,6 +13,13 @@ export type FinalizeOptions = {
   // least one with the allowlist — undeclared posts always pass, so the feed
   // biases toward these languages without starving. Empty/undefined = off.
   languages?: string[]
+  // The viewer's preferred languages, for ordering rather than filtering. When
+  // non-empty, posts that declare at least one of them form the first tier and
+  // everything else — other languages and posts that declare none — the second.
+  // Each tier keeps its score order and author spacing, and the per-author cap
+  // counts across both, so an author cannot reappear in the second tier past
+  // their cap. Nothing is dropped. Empty/undefined = one tier, plain score order.
+  languageTiers?: string[]
   // the requesting viewer's DID. Their own authored posts are dropped so the
   // feed never recommends you back to yourself (a taste-neighbor liking your
   // post makes it a candidate). null/undefined for anonymous viewers.
@@ -87,10 +94,14 @@ export const finalize = async (
   const freshnessMs = cfg.freshnessHours * 60 * 60 * 1000
   const langAllow =
     opts.languages && opts.languages.length > 0 ? new Set(opts.languages) : null
+  const preferred =
+    opts.languageTiers && opts.languageTiers.length > 0
+      ? new Set(opts.languageTiers)
+      : null
 
   const includeReplies = opts.includeReplies ?? cfg.includeReplies
 
-  const scored: { uri: string; author: string; score: number }[] = []
+  const scored: Scored[] = []
   for (const [uri, raw] of rawScores) {
     const meta = metas.get(uri)
     if (!meta) continue // unhydratable (deleted/blocked) — drop
@@ -120,23 +131,54 @@ export const finalize = async (
     if (opts.applyPopularityPenalty) {
       score /= Math.pow(Math.max(1, meta.like_count), cfg.popularityPenalty)
     }
-    scored.push({ uri, author: meta.author_did, score })
+    const tier = preferred && !meta.langs.some((l) => preferred.has(l)) ? 1 : 0
+    scored.push({ uri, author: meta.author_did, score, tier })
   }
 
-  scored.sort((a, b) => b.score - a.score)
+  // Tier first (always 0 without language tiers), then score.
+  scored.sort((a, b) => a.tier - b.tier || b.score - a.score)
 
   // Diversification: cap each author's total contribution AND space their posts
-  // apart so the feed never shows a run of the same author. Bucket per author in
-  // descending score order (scored is already sorted, so appending preserves
-  // it), capped at perAuthorCap.
-  const buckets = new Map<string, { uri: string; score: number }[]>()
+  // apart so the feed never shows a run of the same author. The cap is taken in
+  // the order above, so with language tiers an author's in-language posts claim
+  // their slots before anything of theirs in the second tier.
+  const perAuthor = new Map<string, number>()
+  const tiers: Scored[][] = [[], []]
   for (const item of scored) {
+    const n = perAuthor.get(item.author) ?? 0
+    if (n >= cfg.perAuthorCap) continue
+    perAuthor.set(item.author, n + 1)
+    tiers[item.tier].push(item)
+  }
+
+  // The spacing state carries across the tier boundary, so the last author of
+  // the first tier is not repeated at the start of the second.
+  const out: string[] = []
+  const lastSlot = new Map<string, number>() // author → slot of their last post
+  for (const tier of tiers) emitSpaced(tier, out, lastSlot, cfg)
+  return out
+}
+
+type Scored = { uri: string; author: string; score: number; tier: number }
+
+// Appends `items` (one tier, in descending score order) to `out`, spacing each
+// author's posts at least authorMinGap slots apart, until out reaches
+// maxFeedSize.
+const emitSpaced = (
+  items: Scored[],
+  out: string[],
+  lastSlot: Map<string, number>,
+  cfg: { maxFeedSize: number; authorMinGap: number },
+): void => {
+  // Bucket per author; appending preserves the descending score order.
+  const buckets = new Map<string, Scored[]>()
+  for (const item of items) {
     let bucket = buckets.get(item.author)
     if (!bucket) {
       bucket = []
       buckets.set(item.author, bucket)
     }
-    if (bucket.length < cfg.perAuthorCap) bucket.push(item)
+    bucket.push(item)
   }
 
   // Emit by repeatedly taking the highest-scoring available post whose author
@@ -149,8 +191,6 @@ export const finalize = async (
     items,
     ptr: 0,
   }))
-  const lastSlot = new Map<string, number>() // author → slot of their last post
-  const out: string[] = []
   while (out.length < cfg.maxFeedSize) {
     let best: (typeof heads)[number] | null = null
     let fallback: (typeof heads)[number] | null = null
@@ -168,6 +208,4 @@ export const finalize = async (
     chosen.ptr++
     lastSlot.set(chosen.author, out.length - 1)
   }
-
-  return out
 }
